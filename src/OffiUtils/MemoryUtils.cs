@@ -22,4 +22,11 @@ public class MemoryUtils
 	public static unsafe void FreeNative(nint intPtr) => NativeMemory.Free(intPtr.ToPointer());
 
 	public static unsafe Span<T> GetSpan<T>(nint intPtr, int length) where T : struct => new(intPtr.ToPointer(), length);
+
+	public static Span<T> AsSpan<T>(ReadOnlySpan<T> readonlySpan)
+	{
+		if (readonlySpan.IsEmpty) return Span<T>.Empty;
+		ref var reference = ref MemoryMarshal.GetReference(readonlySpan);
+		return MemoryMarshal.CreateSpan(ref reference, readonlySpan.Length);
+	}
 }
