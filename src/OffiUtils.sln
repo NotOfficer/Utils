@@ -3,11 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.7.34024.191
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OffiUtils", "OffiUtils\OffiUtils.csproj", "{E60C999D-316A-408C-AFEF-CF79603F7E5C}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OffiUtils", "OffiUtils\OffiUtils.csproj", "{E60C999D-316A-408C-AFEF-CF79603F7E5C}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OffiUtils.Tests", "OffiUtils.Tests\OffiUtils.Tests.csproj", "{20BDABA9-400C-4BC1-AC60-471C3452AA76}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OffiUtils.Playground", "OffiUtils.Playground\OffiUtils.Playground.csproj", "{F5A02DF9-67F6-4808-82DE-91158E829D92}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OffiUtils.Tests", "OffiUtils.Tests\OffiUtils.Tests.csproj", "{20BDABA9-400C-4BC1-AC60-471C3452AA76}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -23,10 +21,6 @@ Global
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Release|Any CPU.Build.0 = Release|Any CPU
-		{F5A02DF9-67F6-4808-82DE-91158E829D92}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{F5A02DF9-67F6-4808-82DE-91158E829D92}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{F5A02DF9-67F6-4808-82DE-91158E829D92}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{F5A02DF9-67F6-4808-82DE-91158E829D92}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
