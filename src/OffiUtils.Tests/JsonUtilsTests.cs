@@ -13,9 +13,9 @@ public class JsonUtilsTests
 			  "car": "Tesla"
 			}
 			""";
-		const string escaped = "{\\r\\n  \\\"name\\\": \\\"Elon Musk\\\",\\r\\n  \\\"age\\\": 69,\\r\\n  \\\"car\\\": \\\"Tesla\\\"\\r\\n}";
+		const string escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}";
 		var escapedBytes = JsonUtils.Encoding.GetBytes(escaped);
 		var result = JsonUtils.GetUnescapedString(escapedBytes);
-		Assert.Equal(unescaped, result);
+		Assert.Equal(unescaped.Replace("\r", ""), result);
 	}
 }

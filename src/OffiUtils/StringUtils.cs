@@ -73,13 +73,12 @@ public static class StringUtils
 	public static string Random(int length, ReadOnlySpan<char> pool)
 	{
 		if (pool.IsEmpty) return string.Empty;
-		var poolLengthPlusOne = pool.Length + 1;
 		var result = FastAllocateStringDelegate(length);
 		var span = GetSpan(result);
 
 		for (var i = 0; i < length; i++)
 		{
-			span[i] = pool[RandomNumberGenerator.GetInt32(poolLengthPlusOne)];
+			span[i] = pool[RandomNumberGenerator.GetInt32(pool.Length)];
 		}
 
 		return result;
