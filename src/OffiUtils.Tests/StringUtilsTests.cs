@@ -31,6 +31,16 @@ public class StringUtilsTests
 	}
 
 	[Fact]
+	public void GetSpan()
+	{
+		var str = StringUtils.RealClone("123");
+		var span = StringUtils.GetSpan(str);
+		Assert.Equal(str.Length, span.Length);
+		span.Fill('a');
+		Assert.Equal("aaa", str);
+	}
+
+	[Fact]
 	public void BytesToHexLower()
 	{
 		var bytes = Enumerable.Range(0, 0xFF + 1).Select(x => (byte)x).ToArray();
