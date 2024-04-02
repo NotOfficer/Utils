@@ -29,4 +29,19 @@ public class MemoryUtils
 		ref var reference = ref MemoryMarshal.GetReference(readonlySpan);
 		return MemoryMarshal.CreateSpan(ref reference, readonlySpan.Length);
 	}
+
+	public static void FreeGCHandleIfValid(ref nint ptr)
+	{
+		if (ptr == IntPtr.Zero) return;
+		var gch = GCHandle.FromIntPtr(ptr);
+		gch.Free();
+		ptr = nint.Zero;
+	}
+
+	public static void FreeLibraryIfValid(ref nint handle)
+	{
+		if (handle == IntPtr.Zero) return;
+		NativeLibrary.Free(handle);
+		handle = nint.Zero;
+	}
 }

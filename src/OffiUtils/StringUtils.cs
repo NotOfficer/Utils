@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
+using CommunityToolkit.HighPerformance.Buffers;
+
 namespace OffiUtils;
 
 public static class StringUtils
@@ -146,5 +148,85 @@ public static class StringUtils
 		var clone = FastAllocateStringDelegate(value.Length);
 		value.AsSpan().CopyTo(GetSpan(clone));
 		return clone;
+	}
+
+	public static string? CutAfter(string value, char needle, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.IndexOf(needle);
+		if (index == -1) return null;
+		var result = span[(index + 1)..];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutAfterLast(string value, char needle, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.LastIndexOf(needle);
+		if (index == -1) return null;
+		var result = span[(index + 1)..];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutAfter(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.IndexOf(needle, comparisonType);
+		if (index == -1) return null;
+		var result = span[(index + 1)..];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutAfterLast(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.LastIndexOf(needle, comparisonType);
+		if (index == -1) return null;
+		var result = span[(index + 1)..];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutBefore(string value, char needle, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.IndexOf(needle);
+		if (index == -1) return null;
+		var result = span[..index];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutBeforeLast(string value, char needle, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.LastIndexOf(needle);
+		if (index == -1) return null;
+		var result = span[..index];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutBefore(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.IndexOf(needle, comparisonType);
+		if (index == -1) return null;
+		var result = span[..index];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
+	}
+
+	public static string? CutBeforeLast(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
+	{
+		if (string.IsNullOrEmpty(value)) return string.Empty;
+		var span = value.AsSpan();
+		var index = span.LastIndexOf(needle, comparisonType);
+		if (index == -1) return null;
+		var result = span[..index];
+		return pool is null ? result.ToString() : pool.GetOrAdd(result);
 	}
 }
