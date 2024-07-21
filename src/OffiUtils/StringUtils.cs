@@ -67,8 +67,32 @@ public static class StringUtils
 		return result;
 	}
 
+	private static bool TryWriteBytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr, Span<char> destination, out int charsWritten)
+	{
+		var charsToWrite = bytes.Length * 2;
+		if (destination.Length < charsToWrite)
+		{
+			charsWritten = 0;
+			return false;
+		}
+
+		var resultSpan32 = MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref destination.GetPinnableReference()), bytes.Length);
+		var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
+
+		for (var i = 0; i < resultSpan32.Length; i++)
+		{
+			resultSpan32[i] = lookupSpan[bytes[i]];
+		}
+
+		charsWritten = charsToWrite;
+		return true;
+	}
+
 	public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, Lookup32LowerPtr);
 	public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, Lookup32UpperPtr);
+
+	public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32LowerPtr, destination, out charsWritten);
+	public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32UpperPtr, destination, out charsWritten);
 
 	public static ref char GetRawData(string instance) => ref GetRawStringDataDelegate(instance);
 
