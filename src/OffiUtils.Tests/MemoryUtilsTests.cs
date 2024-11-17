@@ -9,7 +9,7 @@ public class MemoryUtilsTests
 		var readonlySpan = new ReadOnlySpan<int>(array);
 		var span = MemoryUtils.AsSpan(readonlySpan);
 		Assert.Equal(array.Length, span.Length);
-		span.Fill(0x69_240);
-		Assert.All(array, x => Assert.Equal(0x69_240, x));
+		span.Fill(0x69_420);
+		Assert.All(array, x => Assert.Equal(0x69_420, x));
 	}
 }

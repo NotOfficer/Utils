@@ -5,17 +5,16 @@ public class JsonUtilsTests
 	[Fact]
 	public void TryUnescape()
 	{
-		const string unescaped =
+		var unescaped =
 			"""
 			{
 			  "name": "Elon Musk",
 			  "age": 69,
 			  "car": "Tesla"
 			}
-			""";
-		const string escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}";
-		var escapedBytes = JsonUtils.Encoding.GetBytes(escaped);
-		var result = JsonUtils.GetUnescapedString(escapedBytes);
-		Assert.Equal(unescaped.Replace("\r", ""), result);
+			""".Replace("\r", "");
+		var escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}"u8;
+		var result = JsonUtils.GetUnescapedString(escaped);
+		Assert.Equal(unescaped, result);
 	}
 }
