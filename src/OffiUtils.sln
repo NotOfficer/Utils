@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OffiUtils", "OffiUtils\Offi
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "OffiUtils.Tests", "OffiUtils.Tests\OffiUtils.Tests.csproj", "{20BDABA9-400C-4BC1-AC60-471C3452AA76}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OffiUtils.Playground", "OffiUtils.Playground\OffiUtils.Playground.csproj", "{38A01A47-2C60-4CC2-908E-C7231510A10A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{20BDABA9-400C-4BC1-AC60-471C3452AA76}.Release|Any CPU.Build.0 = Release|Any CPU
+		{38A01A47-2C60-4CC2-908E-C7231510A10A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{38A01A47-2C60-4CC2-908E-C7231510A10A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{38A01A47-2C60-4CC2-908E-C7231510A10A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{38A01A47-2C60-4CC2-908E-C7231510A10A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
