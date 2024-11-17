@@ -5,22 +5,22 @@ using System.Text;
 
 namespace OffiUtils;
 
-public static class JsonUtils
+public static unsafe class JsonUtils
 {
 	public const int StackallocByteThreshold = 256;
 	public static readonly UTF8Encoding Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-	private static readonly TryUnescapeDelegate TryUnescapeDelegate;
+	private static readonly delegate*<ReadOnlySpan<byte>, Span<byte>, out int, bool> TryUnescapeFunctionPointer;
 
 	static JsonUtils()
 	{
 		var helperType = Type.GetType("System.Text.Json.JsonReaderHelper, System.Text.Json")!;
 		var tryUnescapeTypes = new[] { typeof(ReadOnlySpan<byte>), typeof(Span<byte>), typeof(int).MakeByRefType() };
 		var tryUnescapeMethodInfo = helperType.GetMethod("TryUnescape", BindingFlags.Static | BindingFlags.NonPublic, tryUnescapeTypes)!;
-		TryUnescapeDelegate = tryUnescapeMethodInfo.CreateDelegate<TryUnescapeDelegate>();
+		TryUnescapeFunctionPointer = (delegate*<ReadOnlySpan<byte>, Span<byte>, out int, bool>)tryUnescapeMethodInfo.MethodHandle.GetFunctionPointer();
 	}
 
-	public static bool TryUnescape(ReadOnlySpan<byte> source, Span<byte> destination, out int written) => TryUnescapeDelegate(source, destination, out written);
+	public static bool TryUnescape(ReadOnlySpan<byte> source, Span<byte> destination, out int written) => TryUnescapeFunctionPointer(source, destination, out written);
 
 	public static string GetUnescapedString(ReadOnlySpan<byte> utf8Source)
 	{
@@ -32,7 +32,7 @@ public static class JsonUtils
 			stackalloc byte[StackallocByteThreshold] :
 			pooledName = ArrayPool<byte>.Shared.Rent(length);
  
-		TryUnescapeDelegate(utf8Source, utf8Unescaped, out var written);
+		TryUnescapeFunctionPointer(utf8Source, utf8Unescaped, out var written);
 		Debug.Assert(written > 0);
  
 		utf8Unescaped = utf8Unescaped[..written];
