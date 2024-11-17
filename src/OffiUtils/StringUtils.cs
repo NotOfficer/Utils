@@ -1,34 +1,41 @@
-﻿using System.Diagnostics;
-using System.Reflection;
+﻿using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-
-using CommunityToolkit.HighPerformance.Buffers;
 
 namespace OffiUtils;
 
-public static class StringUtils
+public static unsafe partial class StringUtils
 {
-	public const string RandomPool = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz";
+	public const string RandomPool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567890123456789012345678901234567890123456789";
 
-	private static readonly nint Lookup32LowerPtr;
-	private static readonly nint Lookup32UpperPtr;
-
-	private static readonly FastAllocateStringDelegate FastAllocateStringDelegate;
-	private static readonly GetRawStringDataDelegate GetRawStringDataDelegate;
+	private static readonly delegate*<int, string> FastAllocateStringFunctionPointer;
 
 	static StringUtils()
 	{
+#if !NET9_0_OR_GREATER
 		Lookup32LowerPtr = CreateLookup32Unsafe(true);
 		Lookup32UpperPtr = CreateLookup32Unsafe(false);
-
-		var stringType = typeof(string);
-		var fastAllocateStringMethodInfo = stringType.GetMethod("FastAllocateString", BindingFlags.Static | BindingFlags.NonPublic)!;
-		FastAllocateStringDelegate = fastAllocateStringMethodInfo.CreateDelegate<FastAllocateStringDelegate>();
-		var getRawStringDataMethodInfo = stringType.GetMethod("GetRawStringData", BindingFlags.Instance | BindingFlags.NonPublic)!;
-		GetRawStringDataDelegate = getRawStringDataMethodInfo.CreateDelegate<GetRawStringDataDelegate>();
+#endif
+		var fastAllocateStringMethodInfo = typeof(string).GetMethod("FastAllocateString", BindingFlags.Static | BindingFlags.NonPublic)!;
+		FastAllocateStringFunctionPointer = (delegate*<int, string>)fastAllocateStringMethodInfo.MethodHandle.GetFunctionPointer();
 	}
+
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static string FastAllocate(int length) => FastAllocateStringFunctionPointer(length);
+
+#if NET9_0_OR_GREATER
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes);
+
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexStringLower(bytes, destination, out charsWritten);
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexString(bytes, destination, out charsWritten);
+#else
+	private static readonly nint Lookup32LowerPtr;
+	private static readonly nint Lookup32UpperPtr;
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static char ConvertNibble(int nibble, int adjust) =>
@@ -37,7 +44,7 @@ public static class StringUtils
 	private static nint CreateLookup32Unsafe(bool lowerCase)
 	{
 		var adjust = lowerCase ? 32 : 0;
-		var span = MemoryUtils.AllocNative<uint>(256, out var ptr);
+		var span = MemoryUtils.NativeAlloc<uint>(256, out var ptr);
 
 		for (var i = 0; i < 256; i++)
 		{
@@ -49,14 +56,10 @@ public static class StringUtils
 		return ptr;
 	}
 
-	public static Span<char> GetSpan(string value) => MemoryMarshal.CreateSpan(ref GetRawStringDataDelegate(value), value.Length);
-
-	public static string FastAllocate(int length) => FastAllocateStringDelegate(length);
-
 	private static string BytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr)
 	{
-		var result = FastAllocateStringDelegate(bytes.Length * sizeof(char));
-		var resultSpan32 = MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref GetRawStringDataDelegate(result)), bytes.Length);
+		var result = FastAllocateStringFunctionPointer(bytes.Length * sizeof(char));
+		var resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
 		var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
 
 		for (var i = 0; i < resultSpan32.Length; i++)
@@ -76,7 +79,7 @@ public static class StringUtils
 			return false;
 		}
 
-		var resultSpan32 = MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref destination.GetPinnableReference()), bytes.Length);
+		var resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref destination.GetPinnableReference()), bytes.Length);
 		var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
 
 		for (var i = 0; i < resultSpan32.Length; i++)
@@ -93,23 +96,12 @@ public static class StringUtils
 
 	public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32LowerPtr, destination, out charsWritten);
 	public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32UpperPtr, destination, out charsWritten);
+#endif
 
-	public static ref char GetRawData(string instance) => ref GetRawStringDataDelegate(instance);
-
-	public static string Random(int length, ReadOnlySpan<char> pool)
-	{
-		if (pool.IsEmpty) return string.Empty;
-		var result = FastAllocateStringDelegate(length);
-		var span = GetSpan(result);
-
-		for (var i = 0; i < length; i++)
-		{
-			span[i] = pool[RandomNumberGenerator.GetInt32(pool.Length)];
-		}
-
-		return result;
-	}
-	public static string Random(int length) => Random(length, RandomPool);
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static string Random(int length, ReadOnlySpan<char> pool) => RandomNumberGenerator.GetString(pool, length);
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	public static string Random(int length) => RandomNumberGenerator.GetString(RandomPool, length);
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static char ToLowerAsciiInvariant(char c)
@@ -123,7 +115,7 @@ public static class StringUtils
 	}
 
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	internal static char ToUpperAsciiInvariant(char c)
+	public static char ToUpperAsciiInvariant(char c)
 	{
 		if (char.IsAsciiLetterLower(c))
 		{
@@ -131,126 +123,37 @@ public static class StringUtils
 		}
 		return c;
 	}
-		
-	public static void ToLowerAsciiInvariant(ReadOnlySpan<char> source, Span<char> destination)
-	{
-		Debug.Assert(destination.Length >= source.Length);
 
-		for (var i = 0; i < source.Length; i++)
+	public static void ToLowerAsciiInvariant(ReadOnlySpan<char> value, Span<char> destination)
+	{
+		for (var i = 0; i < value.Length; i++)
 		{
-			destination[i] = ToLowerAsciiInvariant(source[i]);
+			destination[i] = ToLowerAsciiInvariant(value[i]);
 		}
 	}
 
-	public static void ToUpperAsciiInvariant(ReadOnlySpan<char> source, Span<char> destination)
+	public static void ToUpperAsciiInvariant(ReadOnlySpan<char> value, Span<char> destination)
 	{
-		Debug.Assert(destination.Length >= source.Length);
-
-		for (var i = 0; i < source.Length; i++)
+		for (var i = 0; i < value.Length; i++)
 		{
-			destination[i] = ToUpperAsciiInvariant(source[i]);
+			destination[i] = ToUpperAsciiInvariant(value[i]);
 		}
 	}
 
 	public static void ToLowerAsciiInvariant(string value)
 	{
-		if (string.IsNullOrEmpty(value)) return;
-		var span = GetSpan(value);
+		if (value.Length == 0) return;
+		var span = value.GetSpan();
 		ToLowerAsciiInvariant(span, span);
 	}
 
 	public static void ToUpperAsciiInvariant(string value)
 	{
-		if (string.IsNullOrEmpty(value)) return;
-		var span = GetSpan(value);
+		if (value.Length == 0) return;
+		var span = value.GetSpan();
 		ToUpperAsciiInvariant(span, span);
 	}
 
-	public static string RealClone(string value)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var clone = FastAllocateStringDelegate(value.Length);
-		value.AsSpan().CopyTo(GetSpan(clone));
-		return clone;
-	}
-
-	public static string? CutAfter(string value, char needle, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.IndexOf(needle);
-		if (index == -1) return null;
-		var result = span[(index + 1)..];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutAfterLast(string value, char needle, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.LastIndexOf(needle);
-		if (index == -1) return null;
-		var result = span[(index + 1)..];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutAfter(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.IndexOf(needle, comparisonType);
-		if (index == -1) return null;
-		var result = span[(index + 1)..];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutAfterLast(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.LastIndexOf(needle, comparisonType);
-		if (index == -1) return null;
-		var result = span[(index + 1)..];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutBefore(string value, char needle, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.IndexOf(needle);
-		if (index == -1) return null;
-		var result = span[..index];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutBeforeLast(string value, char needle, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.LastIndexOf(needle);
-		if (index == -1) return null;
-		var result = span[..index];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutBefore(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.IndexOf(needle, comparisonType);
-		if (index == -1) return null;
-		var result = span[..index];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
-
-	public static string? CutBeforeLast(string value, string needle, StringComparison comparisonType = StringComparison.Ordinal, StringPool? pool = null)
-	{
-		if (string.IsNullOrEmpty(value)) return string.Empty;
-		var span = value.AsSpan();
-		var index = span.LastIndexOf(needle, comparisonType);
-		if (index == -1) return null;
-		var result = span[..index];
-		return pool is null ? result.ToString() : pool.GetOrAdd(result);
-	}
+	public static string RealClone(ReadOnlySpan<char> value)
+		=> value.ToString();
 }
