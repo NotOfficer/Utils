@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+defaults:
+  run:
+    working-directory: src
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        dotnet: [ '8.0.x', '9.0.x' ]
+    name: .NET ${{ matrix.dotnet }} Test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v4
+        id: stepid
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Create temporary global.json
+        run: echo '{"sdk":{"version":"${{ steps.stepid.outputs.dotnet-version }}"}}' > ./global.json
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Run Tests
+        run: dotnet test --no-build --configuration Release --verbosity normal
