@@ -1,16 +1,7 @@
-using Xunit.Abstractions;
-
 namespace OffiUtils.Tests;
 
 public class StringUtilsTests
 {
-	private readonly ITestOutputHelper _outputHelper;
-
-	public StringUtilsTests(ITestOutputHelper outputHelper)
-	{
-		_outputHelper = outputHelper;
-	}
-
 	[Fact]
 	public void FastAllocate()
 	{
@@ -21,23 +12,14 @@ public class StringUtilsTests
 	}
 
 	[Fact]
-	public void GetRawData()
+	public void RealClone()
 	{
-		var str = StringUtils.RealClone("123");
-		ref var rawData = ref StringUtils.GetRawData(str);
-		Assert.Equal('1', rawData);
-		rawData = 'a';
-		Assert.Equal('a', str[0]);
-	}
-
-	[Fact]
-	public void GetSpan()
-	{
-		var str = StringUtils.RealClone("123");
-		var span = StringUtils.GetSpan(str);
-		Assert.Equal(str.Length, span.Length);
-		span.Fill('a');
-		Assert.Equal("aaa", str);
+		var str = new string('1', 69);
+		var clone = StringUtils.RealClone(str);
+		Assert.Equal(str, clone, StringComparer.Ordinal);
+		Assert.Equal(str, str.Clone(), ReferenceEquals);
+		Assert.Equal(clone, clone.Clone(), ReferenceEquals);
+		Assert.NotEqual(str, clone, ReferenceEquals);
 	}
 
 	[Fact]
@@ -67,22 +49,22 @@ public class StringUtilsTests
 		var result = StringUtils.Random(length);
 		Assert.NotNull(result);
 		Assert.Equal(length, result.Length);
-		Assert.False(result.All(x => x == '\0'));
+		Assert.All(result, c => Assert.NotEqual('\0', c));
 	}
 
 	[Fact]
 	public void ToLower()
 	{
-		var str = StringUtils.RealClone("ABC");
+		var str = new string('A', 3);
 		StringUtils.ToLowerAsciiInvariant(str);
-		Assert.Equal("abc", str);
+		Assert.Equal("aaa", str);
 	}
 
 	[Fact]
 	public void ToUpper()
 	{
-		var str = StringUtils.RealClone("abc");
+		var str = new string('a', 3);
 		StringUtils.ToUpperAsciiInvariant(str);
-		Assert.Equal("ABC", str);
+		Assert.Equal("AAA", str);
 	}
 }
