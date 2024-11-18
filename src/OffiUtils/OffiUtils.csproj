@@ -30,7 +30,6 @@
 
   <ItemGroup>
     <None Include="..\..\icon.png" Pack="True" PackagePath="" Visible="False" />
-    <None Include="..\..\LICENSE" Pack="True" PackagePath="" Visible="False" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
