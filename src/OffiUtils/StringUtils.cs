@@ -12,7 +12,7 @@ public static unsafe partial class StringUtils
 
 	static StringUtils()
 	{
-#if !NET9_0_OR_GREATER
+#if !MS_IS_STUPID
 		Lookup32LowerPtr = CreateLookup32Unsafe(true);
 		Lookup32UpperPtr = CreateLookup32Unsafe(false);
 #endif
@@ -23,7 +23,7 @@ public static unsafe partial class StringUtils
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string FastAllocate(int length) => FastAllocateStringFunctionPointer(length);
 
-#if NET9_0_OR_GREATER
+#if MS_IS_STUPID // https://github.com/dotnet/runtime/issues/109807
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
 	[MethodImpl(MethodImplOptions.AggressiveInlining)]
