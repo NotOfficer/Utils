@@ -5,7 +5,7 @@ public class JsonUtilsTests
     [Fact]
     public void GetUnescapedString()
     {
-        var unescaped =
+        string unescaped =
             """
             {
               "name": "Elon Musk",
@@ -14,14 +14,14 @@ public class JsonUtilsTests
             }
             """.Replace("\r", "");
         var escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}"u8;
-        var result = JsonUtils.GetUnescapedString(escaped);
+        string result = JsonUtils.GetUnescapedString(escaped);
         Assert.Equal(unescaped, result);
     }
 
     [Fact]
     public void TryUnescapeBytes()
     {
-        var unescaped = JsonUtils.Encoding.GetBytes(
+        Span<byte> unescaped = JsonUtils.Encoding.GetBytes(
             """
             {
               "name": "Elon Musk",
@@ -30,9 +30,9 @@ public class JsonUtilsTests
             }
             """.Replace("\r", "")).AsSpan();
         var escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}"u8;
-        var unescapedBytes = new byte[escaped.Length].AsSpan();
+        Span<byte> unescapedBytes = new byte[escaped.Length].AsSpan();
 
-        var result = JsonUtils.TryUnescape(escaped, unescapedBytes, out var written);
+        bool result = JsonUtils.TryUnescape(escaped, unescapedBytes, out int written);
         Assert.True(result);
         Assert.Equal(unescaped.Length, written);
         Assert.Equal(unescaped, unescapedBytes[..written]);
@@ -41,7 +41,7 @@ public class JsonUtilsTests
     [Fact]
     public void TryUnescapeChars()
     {
-        var unescaped =
+        ReadOnlySpan<char> unescaped =
             """
             {
               "name": "Elon Musk",
@@ -50,9 +50,9 @@ public class JsonUtilsTests
             }
             """.Replace("\r", "").AsSpan();
         var escaped = "{\\n  \\\"name\\\": \\\"Elon Musk\\\",\\n  \\\"age\\\": 69,\\n  \\\"car\\\": \\\"Tesla\\\"\\n}"u8;
-        var unescapedChars = new char[escaped.Length].AsSpan();
+        Span<char> unescapedChars = new char[escaped.Length].AsSpan();
 
-        var result = JsonUtils.TryUnescape(escaped, unescapedChars, out var written);
+        bool result = JsonUtils.TryUnescape(escaped, unescapedChars, out int written);
         Assert.True(result);
         Assert.Equal(unescaped.Length, written);
         Assert.Equal(unescaped, unescapedChars[..written]);

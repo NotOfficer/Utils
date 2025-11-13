@@ -7,21 +7,21 @@ namespace OffiUtils;
 public static partial class StringUtils
 {
     public static string CutAfter(this string value, ReadOnlySpan<char> needle)
-        => TryCutAfter(value.AsSpan(), needle, out var result) ? result : value;
+        => TryCutAfter(value.AsSpan(), needle, out string? result) ? result : value;
     public static string CutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle)
-        => TryCutAfter(value, needle, out var result) ? result : value.ToString();
+        => TryCutAfter(value, needle, out string? result) ? result : value.ToString();
     public static string CutAfter(this string value, ReadOnlySpan<char> needle, StringComparison comparisonType)
-        => TryCutAfter(value.AsSpan(), needle, comparisonType, out var result) ? result : value;
+        => TryCutAfter(value.AsSpan(), needle, comparisonType, out string? result) ? result : value;
     public static string CutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType)
-        => TryCutAfter(value, needle, comparisonType, out var result) ? result : value.ToString();
+        => TryCutAfter(value, needle, comparisonType, out string? result) ? result : value.ToString();
     public static string CutAfter(this string value, ReadOnlySpan<char> needle, StringPool? pool)
-        => TryCutAfter(value.AsSpan(), needle, pool, out var result) ? result : value;
+        => TryCutAfter(value.AsSpan(), needle, pool, out string? result) ? result : value;
     public static string CutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringPool? pool)
-        => TryCutAfter(value, needle, pool, out var result) ? result : value.ToString();
+        => TryCutAfter(value, needle, pool, out string? result) ? result : value.ToString();
     public static string CutAfter(this string value, ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool)
-        => TryCutAfter(value.AsSpan(), needle, comparisonType, pool, out var result) ? result : value;
+        => TryCutAfter(value.AsSpan(), needle, comparisonType, pool, out string? result) ? result : value;
     public static string CutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool)
-        => TryCutAfter(value, needle, comparisonType, pool, out var result) ? result : value.ToString();
+        => TryCutAfter(value, needle, comparisonType, pool, out string? result) ? result : value.ToString();
 
     public static bool TryCutAfter(this string value, ReadOnlySpan<char> needle, [NotNullWhen(true)] out string? result)
         => TryCutAfter(value.AsSpan(), needle, null, out result);
@@ -39,7 +39,7 @@ public static partial class StringUtils
         => TryCutAfter(value.AsSpan(), needle, comparisonType, pool, out result);
     public static bool TryCutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool, [NotNullWhen(true)] out string? result)
     {
-        if (TryCutSpanAfter(value, needle, out var cutValue))
+        if (TryCutSpanAfter(value, needle, out ReadOnlySpan<char> cutValue))
         {
             result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
             return true;
@@ -56,7 +56,7 @@ public static partial class StringUtils
         => TryCutAfter(value.AsSpan(), needle, comparisonType, destination, out charsWritten);
     public static bool TryCutAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType, Span<char> destination, out int charsWritten)
     {
-        if (TryCutSpanAfter(value, needle, out var cutValue) && cutValue.TryCopyTo(destination))
+        if (TryCutSpanAfter(value, needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
         {
             charsWritten = cutValue.Length;
             return true;
@@ -66,9 +66,9 @@ public static partial class StringUtils
     }
 
     public static ReadOnlySpan<char> CutSpanAfter(this string value, ReadOnlySpan<char> needle, StringComparison comparisonType = StringComparison.Ordinal)
-        => TryCutSpanAfter(value.AsSpan(), needle, comparisonType, out var cutValue) ? cutValue : value;
+        => TryCutSpanAfter(value.AsSpan(), needle, comparisonType, out ReadOnlySpan<char> cutValue) ? cutValue : value;
     public static ReadOnlySpan<char> CutSpanAfter(this ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType = StringComparison.Ordinal)
-        => TryCutSpanAfter(value, needle, comparisonType, out var cutValue) ? cutValue : value;
+        => TryCutSpanAfter(value, needle, comparisonType, out ReadOnlySpan<char> cutValue) ? cutValue : value;
 
     public static bool TryCutSpanAfter(this string value, ReadOnlySpan<char> needle, out ReadOnlySpan<char> cutValue)
         => TryCutSpanAfter(value.AsSpan(), needle, StringComparison.Ordinal, out cutValue);
@@ -80,7 +80,7 @@ public static partial class StringUtils
     {
         cutValue = default;
         if (value.IsEmpty) return false;
-        var index = value.IndexOf(needle, comparisonType);
+        int index = value.IndexOf(needle, comparisonType);
         if (index == -1) return false;
         cutValue = value[(index + needle.Length)..];
         return true;

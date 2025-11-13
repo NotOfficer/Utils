@@ -17,7 +17,7 @@ public static class NumberUtils
         where TVal : IBinaryInteger<TVal>
         where TAl : IBinaryInteger<TAl>
     {
-        var al = TVal.CreateChecked(alignment);
+        TVal al = TVal.CreateChecked(alignment);
         return val + al - TVal.One & ~(al - TVal.One);
     }
 

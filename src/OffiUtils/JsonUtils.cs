@@ -15,9 +15,9 @@ public static unsafe class JsonUtils
 
         utf8Source = utf8Source.Trim((byte)'"');
 
-        var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+        int length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
 
-        var arraySource = length <= StackallocByteThreshold ?
+        Span<byte> arraySource = length <= StackallocByteThreshold ?
             stackalloc byte[length] :
             (pooledName = ArrayPool<byte>.Shared.Rent(length))
                 .AsSpan()[..length];
@@ -50,9 +50,9 @@ public static unsafe class JsonUtils
 
         utf8Source = utf8Source.Trim((byte)'"');
 
-        var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+        int length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
 
-        var arraySource = length <= StackallocByteThreshold ?
+        Span<byte> arraySource = length <= StackallocByteThreshold ?
             stackalloc byte[length] :
             (pooledName = ArrayPool<byte>.Shared.Rent(length))
             .AsSpan()[..length];
@@ -87,13 +87,13 @@ public static unsafe class JsonUtils
         {
             var reader = new Utf8JsonReader(arraySource);
 
-            var arrayStartResult = reader.Read();
+            bool arrayStartResult = reader.Read();
             if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
             {
                 return false;
             }
 
-            var stringEntryResult = reader.Read();
+            bool stringEntryResult = reader.Read();
             if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
             {
                 return false;
@@ -116,13 +116,13 @@ public static unsafe class JsonUtils
         {
             var reader = new Utf8JsonReader(arraySource);
 
-            var arrayStartResult = reader.Read();
+            bool arrayStartResult = reader.Read();
             if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
             {
                 return false;
             }
 
-            var stringEntryResult = reader.Read();
+            bool stringEntryResult = reader.Read();
             if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
             {
                 return false;
@@ -143,13 +143,13 @@ public static unsafe class JsonUtils
         {
             var reader = new Utf8JsonReader(arraySource);
 
-            var arrayStartResult = reader.Read();
+            bool arrayStartResult = reader.Read();
             if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
             {
                 return "";
             }
 
-            var stringEntryResult = reader.Read();
+            bool stringEntryResult = reader.Read();
             if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
             {
                 return "";
@@ -169,9 +169,9 @@ public static unsafe class JsonUtils
 
         utf8Source = utf8Source.Trim((byte)'"');
 
-        var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+        int length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
 
-        var arraySource = length <= StackallocByteThreshold ?
+        Span<byte> arraySource = length <= StackallocByteThreshold ?
             stackalloc byte[length] :
             (pooledName = ArrayPool<byte>.Shared.Rent(length))
             .AsSpan()[..length];

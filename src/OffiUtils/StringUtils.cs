@@ -10,8 +10,8 @@ public static partial class StringUtils
     static StringUtils()
     {
 #if !NET10_0_OR_GREATER // don't use >= 9 because of this bug in older runtimes: https://github.com/dotnet/runtime/issues/109807
-        Lookup32LowerPtr = CreateLookup32Unsafe(true);
-        Lookup32UpperPtr = CreateLookup32Unsafe(false);
+        _lookup32LowerPtr = CreateLookup32Unsafe(true);
+        _lookup32UpperPtr = CreateLookup32Unsafe(false);
 #endif
     }
 
@@ -26,21 +26,21 @@ public static partial class StringUtils
     public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexStringLower(bytes, destination, out charsWritten);
     public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexString(bytes, destination, out charsWritten);
 #else
-    private static readonly nint Lookup32LowerPtr;
-    private static readonly nint Lookup32UpperPtr;
+    private static readonly nint _lookup32LowerPtr;
+    private static readonly nint _lookup32UpperPtr;
 
     private static char ConvertNibble(int nibble, int adjust) =>
         (char)(55 + adjust + nibble + (((nibble - 10) >> 31) & (-7 - adjust)));
 
     private static nint CreateLookup32Unsafe(bool lowerCase)
     {
-        var adjust = lowerCase ? 32 : 0;
-        var span = MemoryUtils.NativeAlloc<uint>(256, out var ptr);
+        int adjust = lowerCase ? 32 : 0;
+        Span<uint> span = MemoryUtils.NativeAlloc<uint>(256, out nint ptr);
 
-        for (var i = 0; i < 256; i++)
+        for (int i = 0; i < 256; i++)
         {
-            var a = ConvertNibble(i >> 4, adjust);
-            var b = ConvertNibble(i & 0xF, adjust);
+            char a = ConvertNibble(i >> 4, adjust);
+            char b = ConvertNibble(i & 0xF, adjust);
             span[i] = ((uint)a) + ((uint)b << 16);
         }
 
@@ -49,11 +49,11 @@ public static partial class StringUtils
 
     private static string BytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr)
     {
-        var result = FastAllocate(bytes.Length * sizeof(char));
-        var resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
-        var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
+        string result = FastAllocate(bytes.Length * sizeof(char));
+        Span<uint> resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
+        Span<uint> lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
 
-        for (var i = 0; i < resultSpan32.Length; i++)
+        for (int i = 0; i < resultSpan32.Length; i++)
         {
             resultSpan32[i] = lookupSpan[bytes[i]];
         }
@@ -63,17 +63,17 @@ public static partial class StringUtils
 
     private static bool TryWriteBytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr, Span<char> destination, out int charsWritten)
     {
-        var charsToWrite = bytes.Length * 2;
+        int charsToWrite = bytes.Length * 2;
         if (destination.Length < charsToWrite)
         {
             charsWritten = 0;
             return false;
         }
 
-        var resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref destination.GetPinnableReference()), bytes.Length);
-        var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
+        Span<uint> resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref destination.GetPinnableReference()), bytes.Length);
+        Span<uint> lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
 
-        for (var i = 0; i < resultSpan32.Length; i++)
+        for (int i = 0; i < resultSpan32.Length; i++)
         {
             resultSpan32[i] = lookupSpan[bytes[i]];
         }
@@ -82,11 +82,11 @@ public static partial class StringUtils
         return true;
     }
 
-    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, Lookup32LowerPtr);
-    public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, Lookup32UpperPtr);
+    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, _lookup32LowerPtr);
+    public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, _lookup32UpperPtr);
 
-    public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32LowerPtr, destination, out charsWritten);
-    public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32UpperPtr, destination, out charsWritten);
+    public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, _lookup32LowerPtr, destination, out charsWritten);
+    public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, _lookup32UpperPtr, destination, out charsWritten);
 #endif
 
     public static string Random(int length, ReadOnlySpan<char> pool) => RandomNumberGenerator.GetString(pool, length);
@@ -113,7 +113,7 @@ public static partial class StringUtils
 
     public static void ToLowerAsciiInvariant(ReadOnlySpan<char> value, Span<char> destination)
     {
-        for (var i = 0; i < value.Length; i++)
+        for (int i = 0; i < value.Length; i++)
         {
             destination[i] = ToLowerAsciiInvariant(value[i]);
         }
@@ -121,7 +121,7 @@ public static partial class StringUtils
 
     public static void ToUpperAsciiInvariant(ReadOnlySpan<char> value, Span<char> destination)
     {
-        for (var i = 0; i < value.Length; i++)
+        for (int i = 0; i < value.Length; i++)
         {
             destination[i] = ToUpperAsciiInvariant(value[i]);
         }
@@ -130,14 +130,14 @@ public static partial class StringUtils
     public static void ToLowerAsciiInvariant(string value)
     {
         if (value.Length == 0) return;
-        var span = value.GetSpan();
+        Span<char> span = value.GetSpan();
         ToLowerAsciiInvariant(span, span);
     }
 
     public static void ToUpperAsciiInvariant(string value)
     {
         if (value.Length == 0) return;
-        var span = value.GetSpan();
+        Span<char> span = value.GetSpan();
         ToUpperAsciiInvariant(span, span);
     }
 

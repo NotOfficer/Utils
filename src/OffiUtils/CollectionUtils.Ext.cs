@@ -10,7 +10,7 @@ public static class CollectionUtils
     {
         var result = new Dictionary<TKey, TValue>(comparer);
 
-        foreach (var item in source)
+        foreach (KeyValuePair<TKey, TValue> item in source)
         {
             if (predicate(item))
             {
@@ -29,7 +29,7 @@ public static class CollectionUtils
     {
         var result = new Dictionary<TKey, TValue>(comparer);
 
-        foreach (var item in source)
+        foreach (KeyValuePair<TKey, TValue> item in source)
         {
             if (predicate(item.Key))
             {
@@ -48,7 +48,7 @@ public static class CollectionUtils
     {
         var result = new Dictionary<TKey, TValue>(comparer);
 
-        foreach (var item in source)
+        foreach (KeyValuePair<TKey, TValue> item in source)
         {
             if (predicate(item.Value))
             {
