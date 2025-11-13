@@ -9,7 +9,7 @@ public static partial class StringUtils
 
 	static StringUtils()
 	{
-#if !MS_IS_STUPID
+#if !NET10_0_OR_GREATER // don't use >= 9 because of this bug in older runtimes: https://github.com/dotnet/runtime/issues/109807
 		Lookup32LowerPtr = CreateLookup32Unsafe(true);
 		Lookup32UpperPtr = CreateLookup32Unsafe(false);
 #endif
@@ -19,7 +19,7 @@ public static partial class StringUtils
 
 	public static string FastAllocate(int length) => string.Create(length, length, FastAllocateCreateAction);
 
-#if MS_IS_STUPID // https://github.com/dotnet/runtime/issues/109807
+#if NET10_0_OR_GREATER
 	public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
 	public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes);
 
