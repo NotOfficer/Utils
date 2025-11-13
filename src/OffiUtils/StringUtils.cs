@@ -1,14 +1,11 @@
-﻿using System.Reflection;
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
 namespace OffiUtils;
 
-public static unsafe partial class StringUtils
+public static partial class StringUtils
 {
 	public const string RandomPool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567890123456789012345678901234567890123456789";
-
-	private static readonly delegate*<int, string> FastAllocateStringFunctionPointer;
 
 	static StringUtils()
 	{
@@ -16,28 +13,22 @@ public static unsafe partial class StringUtils
 		Lookup32LowerPtr = CreateLookup32Unsafe(true);
 		Lookup32UpperPtr = CreateLookup32Unsafe(false);
 #endif
-		var fastAllocateStringMethodInfo = typeof(string).GetMethod("FastAllocateString", BindingFlags.Static | BindingFlags.NonPublic)!;
-		FastAllocateStringFunctionPointer = (delegate*<int, string>)fastAllocateStringMethodInfo.MethodHandle.GetFunctionPointer();
 	}
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
-	public static string FastAllocate(int length) => FastAllocateStringFunctionPointer(length);
+	private static void FastAllocateCreateAction(Span<char> str, int arg) { }
+
+	public static string FastAllocate(int length) => string.Create(length, length, FastAllocateCreateAction);
 
 #if MS_IS_STUPID // https://github.com/dotnet/runtime/issues/109807
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes);
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexStringLower(bytes, destination, out charsWritten);
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexString(bytes, destination, out charsWritten);
 #else
 	private static readonly nint Lookup32LowerPtr;
 	private static readonly nint Lookup32UpperPtr;
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static char ConvertNibble(int nibble, int adjust) =>
 		(char)(55 + adjust + nibble + (((nibble - 10) >> 31) & (-7 - adjust)));
 
@@ -58,7 +49,7 @@ public static unsafe partial class StringUtils
 
 	private static string BytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr)
 	{
-		var result = FastAllocateStringFunctionPointer(bytes.Length * sizeof(char));
+		var result = FastAllocate(bytes.Length * sizeof(char));
 		var resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
 		var lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
 
@@ -98,12 +89,9 @@ public static unsafe partial class StringUtils
 	public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, Lookup32UpperPtr, destination, out charsWritten);
 #endif
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string Random(int length, ReadOnlySpan<char> pool) => RandomNumberGenerator.GetString(pool, length);
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static string Random(int length) => RandomNumberGenerator.GetString(RandomPool, length);
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static char ToLowerAsciiInvariant(char c)
 	{
 		if (char.IsAsciiLetterUpper(c))
@@ -114,7 +102,6 @@ public static unsafe partial class StringUtils
 		return c;
 	}
 
-	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	public static char ToUpperAsciiInvariant(char c)
 	{
 		if (char.IsAsciiLetterLower(c))
