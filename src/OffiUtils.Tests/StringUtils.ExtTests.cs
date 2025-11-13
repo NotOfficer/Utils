@@ -35,7 +35,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -125,7 +125,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -215,7 +215,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -305,7 +305,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -395,7 +395,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -485,7 +485,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -575,7 +575,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
@@ -665,7 +665,7 @@ public class StringUtilsExtTests
 		const char resultSpanInitChar = '#';
 
 		Span<char> resultSpanInit = stackalloc char[result.Length];
-		resultSpanInit.Fill('#');
+		resultSpanInit.Fill(resultSpanInitChar);
 
 		Span<char> resultSpan = stackalloc char[result.Length];
 		string? tryResult;
