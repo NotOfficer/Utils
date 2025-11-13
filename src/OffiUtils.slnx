@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="OffiUtils.Playground/OffiUtils.Playground.csproj" />
+  <Project Path="OffiUtils.Tests/OffiUtils.Tests.csproj" />
+  <Project Path="OffiUtils/OffiUtils.csproj" />
+</Solution>
