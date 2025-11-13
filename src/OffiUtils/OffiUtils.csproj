@@ -21,7 +21,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="..\..\icon.png" Pack="True" PackagePath="" Visible="False" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="" Visible="false" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="" Visible="true" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
