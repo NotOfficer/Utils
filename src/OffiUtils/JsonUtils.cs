@@ -1,7 +1,6 @@
 ﻿using System.Buffers;
-using System.Diagnostics;
-using System.Reflection;
 using System.Text;
+using System.Text.Json;
 
 namespace OffiUtils;
 
@@ -10,42 +9,192 @@ public static unsafe class JsonUtils
 	public const int StackallocByteThreshold = 256;
 	public static readonly UTF8Encoding Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-	private static readonly delegate*<ReadOnlySpan<byte>, Span<byte>, out int, bool> TryUnescapeFunctionPointer;
-
-	static JsonUtils()
+	public static bool TryUnescape(ReadOnlySpan<byte> utf8Source, Span<byte> destination, out int written)
 	{
-		var helperType = Type.GetType("System.Text.Json.JsonReaderHelper, System.Text.Json")!;
-		var tryUnescapeTypes = new[] { typeof(ReadOnlySpan<byte>), typeof(Span<byte>), typeof(int).MakeByRefType() };
-		var tryUnescapeMethodInfo = helperType.GetMethod("TryUnescape", BindingFlags.Static | BindingFlags.NonPublic, tryUnescapeTypes)!;
-		TryUnescapeFunctionPointer = (delegate*<ReadOnlySpan<byte>, Span<byte>, out int, bool>)tryUnescapeMethodInfo.MethodHandle.GetFunctionPointer();
+		byte[]? pooledName = null;
+
+		utf8Source = utf8Source.Trim((byte)'"');
+
+		var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+
+		var arraySource = length <= StackallocByteThreshold ?
+			stackalloc byte[length] :
+			(pooledName = ArrayPool<byte>.Shared.Rent(length))
+				.AsSpan()[..length];
+
+		try
+		{
+			arraySource[0] = (byte)'[';
+			arraySource[1] = (byte)'"';
+
+			utf8Source.CopyTo(arraySource[2..^2]);
+
+			arraySource[^2] = (byte)'"';
+			arraySource[^1] = (byte)']';
+
+			return TryUnescapeFromJsonArray(arraySource, destination, out written);
+		}
+		finally
+		{
+			if (pooledName is not null)
+			{
+				arraySource.Clear();
+				ArrayPool<byte>.Shared.Return(pooledName);
+			}
+		}
 	}
 
-	public static bool TryUnescape(ReadOnlySpan<byte> source, Span<byte> destination, out int written) => TryUnescapeFunctionPointer(source, destination, out written);
+	public static bool TryUnescape(ReadOnlySpan<byte> utf8Source, Span<char> destination, out int written)
+	{
+		byte[]? pooledName = null;
+
+		utf8Source = utf8Source.Trim((byte)'"');
+
+		var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+
+		var arraySource = length <= StackallocByteThreshold ?
+			stackalloc byte[length] :
+			(pooledName = ArrayPool<byte>.Shared.Rent(length))
+			.AsSpan()[..length];
+
+		try
+		{
+			arraySource[0] = (byte)'[';
+			arraySource[1] = (byte)'"';
+
+			utf8Source.CopyTo(arraySource[2..^2]);
+
+			arraySource[^2] = (byte)'"';
+			arraySource[^1] = (byte)']';
+
+			return TryUnescapeFromJsonArray(arraySource, destination, out written);
+		}
+		finally
+		{
+			if (pooledName is not null)
+			{
+				arraySource.Clear();
+				ArrayPool<byte>.Shared.Return(pooledName);
+			}
+		}
+	}
+
+	private static bool TryUnescapeFromJsonArray(ReadOnlySpan<byte> arraySource, Span<byte> destination, out int written)
+	{
+		written = 0;
+
+		try
+		{
+			var reader = new Utf8JsonReader(arraySource);
+
+			var arrayStartResult = reader.Read();
+			if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
+			{
+				return false;
+			}
+
+			var stringEntryResult = reader.Read();
+			if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
+			{
+				return false;
+			}
+
+			written = reader.CopyString(destination);
+			return written != 0;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	private static bool TryUnescapeFromJsonArray(ReadOnlySpan<byte> arraySource, Span<char> destination, out int written)
+	{
+		written = 0;
+
+		try
+		{
+			var reader = new Utf8JsonReader(arraySource);
+
+			var arrayStartResult = reader.Read();
+			if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
+			{
+				return false;
+			}
+
+			var stringEntryResult = reader.Read();
+			if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
+			{
+				return false;
+			}
+
+			written = reader.CopyString(destination);
+			return written != 0;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	private static string UnescapeFromJsonArray(ReadOnlySpan<byte> arraySource)
+	{
+		try
+		{
+			var reader = new Utf8JsonReader(arraySource);
+
+			var arrayStartResult = reader.Read();
+			if (!arrayStartResult || reader.TokenType != JsonTokenType.StartArray)
+			{
+				return "";
+			}
+
+			var stringEntryResult = reader.Read();
+			if (!stringEntryResult || reader.TokenType != JsonTokenType.String)
+			{
+				return "";
+			}
+
+			return reader.GetString()!; // only null when TokenType == JsonTokenType.Null. JsonTokenType.String is ensured
+		}
+		catch
+		{
+			return "";
+		}
+	}
 
 	public static string GetUnescapedString(ReadOnlySpan<byte> utf8Source)
 	{
-		// The escaped name is always >= than the unescaped, so it is safe to use escaped name for the buffer length.
-		var length = utf8Source.Length;
 		byte[]? pooledName = null;
- 
-		var utf8Unescaped = length <= StackallocByteThreshold ?
-			stackalloc byte[StackallocByteThreshold] :
-			pooledName = ArrayPool<byte>.Shared.Rent(length);
- 
-		TryUnescapeFunctionPointer(utf8Source, utf8Unescaped, out var written);
-		Debug.Assert(written > 0);
- 
-		utf8Unescaped = utf8Unescaped[..written];
-		Debug.Assert(!utf8Unescaped.IsEmpty);
- 
-		var utf8String = Encoding.GetString(utf8Unescaped);
- 
-		if (pooledName is not null)
+
+		utf8Source = utf8Source.Trim((byte)'"');
+
+		var length = utf8Source.Length + 2 /* [" */ + 2 /* "] */;
+
+		var arraySource = length <= StackallocByteThreshold ?
+			stackalloc byte[length] :
+			(pooledName = ArrayPool<byte>.Shared.Rent(length))
+			.AsSpan()[..length];
+
+		try
 		{
-			utf8Unescaped.Clear();
-			ArrayPool<byte>.Shared.Return(pooledName);
+			arraySource[0] = (byte)'[';
+			arraySource[1] = (byte)'"';
+
+			utf8Source.CopyTo(arraySource[2..^2]);
+
+			arraySource[^2] = (byte)'"';
+			arraySource[^1] = (byte)']';
+
+			return UnescapeFromJsonArray(arraySource);
 		}
- 
-		return utf8String;
+		finally
+		{
+			if (pooledName is not null)
+			{
+				arraySource.Clear();
+				ArrayPool<byte>.Shared.Return(pooledName);
+			}
+		}
 	}
 }
