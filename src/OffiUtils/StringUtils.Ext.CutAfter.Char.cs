@@ -6,10 +6,10 @@ namespace OffiUtils;
 
 public static partial class StringUtils
 {
-	public static string? CutAfter(this string value, char needle, StringPool? pool = null)
-		=> TryCutAfter(value.AsSpan(), needle, pool, out var result) ? result : null;
-	public static string? CutAfter(this ReadOnlySpan<char> value, char needle, StringPool? pool = null)
-		=> TryCutAfter(value, needle, pool, out var result) ? result : null;
+	public static string CutAfter(this string value, char needle, StringPool? pool = null)
+		=> TryCutAfter(value.AsSpan(), needle, pool, out var result) ? result : value;
+	public static string CutAfter(this ReadOnlySpan<char> value, char needle, StringPool? pool = null)
+		=> TryCutAfter(value, needle, pool, out var result) ? result : value.ToString();
 
 	public static bool TryCutAfter(this string value, char needle, [NotNullWhen(true)] out string? result)
 		=> TryCutAfter(value.AsSpan(), needle, null, out result);
@@ -42,9 +42,9 @@ public static partial class StringUtils
 	}
 
 	public static ReadOnlySpan<char> CutSpanAfter(this string value, char needle)
-		=> TryCutSpanAfter(value.AsSpan(), needle, out var cutValue) ? cutValue : default;
+		=> TryCutSpanAfter(value.AsSpan(), needle, out var cutValue) ? cutValue : value;
 	public static ReadOnlySpan<char> CutSpanAfter(this ReadOnlySpan<char> value, char needle)
-		=> TryCutSpanAfter(value, needle, out var cutValue) ? cutValue : default;
+		=> TryCutSpanAfter(value, needle, out var cutValue) ? cutValue : value;
 
 	public static bool TryCutSpanAfter(this string value, char needle, out ReadOnlySpan<char> cutValue)
 		=> TryCutSpanAfter(value.AsSpan(), needle, out cutValue);

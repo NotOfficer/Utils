@@ -43,8 +43,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutAfter(needle));
-		Assert.Null(badValue.CutAfter(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutAfter(needle));
+		Assert.Equal(badValue, badValue.CutAfter(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutAfter(needle));
 		Assert.Equal(result, value.CutAfter(needle, StringPool.Shared));
@@ -69,7 +69,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfter(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfter(needle));
 		Assert.Equal(result, value.CutSpanAfter(needle));
 
 		Assert.False(badValue.TryCutSpanAfter(needle, out trySpanResult));
@@ -79,8 +79,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutAfter(needle));
-		Assert.Null(badValue.AsSpan().CutAfter(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfter(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfter(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutAfter(needle));
 		Assert.Equal(result, value.AsSpan().CutAfter(needle, StringPool.Shared));
@@ -105,7 +105,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfter(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfter(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanAfter(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanAfter(needle, out trySpanResult));
@@ -133,8 +133,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutAfterLast(needle));
-		Assert.Null(badValue.CutAfterLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutAfterLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutAfterLast(needle));
 		Assert.Equal(result, value.CutAfterLast(needle, StringPool.Shared));
@@ -159,7 +159,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfterLast(needle));
 		Assert.Equal(result, value.CutSpanAfterLast(needle));
 
 		Assert.False(badValue.TryCutSpanAfterLast(needle, out trySpanResult));
@@ -169,8 +169,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutAfterLast(needle));
-		Assert.Null(badValue.AsSpan().CutAfterLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfterLast(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfterLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutAfterLast(needle));
 		Assert.Equal(result, value.AsSpan().CutAfterLast(needle, StringPool.Shared));
@@ -195,7 +195,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfterLast(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanAfterLast(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanAfterLast(needle, out trySpanResult));
@@ -223,8 +223,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutBefore(needle));
-		Assert.Null(badValue.CutBefore(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutBefore(needle));
+		Assert.Equal(badValue, badValue.CutBefore(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutBefore(needle));
 		Assert.Equal(result, value.CutBefore(needle, StringPool.Shared));
@@ -249,7 +249,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBefore(needle));
+		Assert.Equal(badValue, badValue.CutSpanBefore(needle));
 		Assert.Equal(result, value.CutSpanBefore(needle));
 
 		Assert.False(badValue.TryCutSpanBefore(needle, out trySpanResult));
@@ -259,8 +259,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutBefore(needle));
-		Assert.Null(badValue.AsSpan().CutBefore(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutBefore(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutBefore(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutBefore(needle));
 		Assert.Equal(result, value.AsSpan().CutBefore(needle, StringPool.Shared));
@@ -285,7 +285,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBefore(needle));
+		Assert.Equal(badValue, badValue.CutSpanBefore(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanBefore(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanBefore(needle, out trySpanResult));
@@ -313,8 +313,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutBeforeLast(needle));
-		Assert.Null(badValue.CutBeforeLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutBeforeLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutBeforeLast(needle));
 		Assert.Equal(result, value.CutBeforeLast(needle, StringPool.Shared));
@@ -339,7 +339,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanBeforeLast(needle));
 		Assert.Equal(result, value.CutSpanBeforeLast(needle));
 
 		Assert.False(badValue.TryCutSpanBeforeLast(needle, out trySpanResult));
@@ -349,8 +349,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutBeforeLast(needle));
-		Assert.Null(badValue.AsSpan().CutBeforeLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutBeforeLast(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutBeforeLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutBeforeLast(needle));
 		Assert.Equal(result, value.AsSpan().CutBeforeLast(needle, StringPool.Shared));
@@ -375,7 +375,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanBeforeLast(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanBeforeLast(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanBeforeLast(needle, out trySpanResult));
@@ -403,8 +403,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutAfter(needle));
-		Assert.Null(badValue.CutAfter(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutAfter(needle));
+		Assert.Equal(badValue, badValue.CutAfter(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutAfter(needle));
 		Assert.Equal(result, value.CutAfter(needle, StringPool.Shared));
@@ -429,7 +429,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfter(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfter(needle));
 		Assert.Equal(result, value.CutSpanAfter(needle));
 
 		Assert.False(badValue.TryCutSpanAfter(needle, out trySpanResult));
@@ -439,8 +439,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutAfter(needle));
-		Assert.Null(badValue.AsSpan().CutAfter(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfter(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfter(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutAfter(needle));
 		Assert.Equal(result, value.AsSpan().CutAfter(needle, StringPool.Shared));
@@ -465,7 +465,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfter(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfter(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanAfter(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanAfter(needle, out trySpanResult));
@@ -493,8 +493,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutAfterLast(needle));
-		Assert.Null(badValue.CutAfterLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutAfterLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutAfterLast(needle));
 		Assert.Equal(result, value.CutAfterLast(needle, StringPool.Shared));
@@ -519,7 +519,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfterLast(needle));
 		Assert.Equal(result, value.CutSpanAfterLast(needle));
 
 		Assert.False(badValue.TryCutSpanAfterLast(needle, out trySpanResult));
@@ -529,8 +529,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutAfterLast(needle));
-		Assert.Null(badValue.AsSpan().CutAfterLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfterLast(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutAfterLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutAfterLast(needle));
 		Assert.Equal(result, value.AsSpan().CutAfterLast(needle, StringPool.Shared));
@@ -555,7 +555,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanAfterLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanAfterLast(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanAfterLast(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanAfterLast(needle, out trySpanResult));
@@ -583,8 +583,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutBefore(needle));
-		Assert.Null(badValue.CutBefore(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutBefore(needle));
+		Assert.Equal(badValue, badValue.CutBefore(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutBefore(needle));
 		Assert.Equal(result, value.CutBefore(needle, StringPool.Shared));
@@ -609,7 +609,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBefore(needle));
+		Assert.Equal(badValue, badValue.CutSpanBefore(needle));
 		Assert.Equal(result, value.CutSpanBefore(needle));
 
 		Assert.False(badValue.TryCutSpanBefore(needle, out trySpanResult));
@@ -619,8 +619,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutBefore(needle));
-		Assert.Null(badValue.AsSpan().CutBefore(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutBefore(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutBefore(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutBefore(needle));
 		Assert.Equal(result, value.AsSpan().CutBefore(needle, StringPool.Shared));
@@ -645,7 +645,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBefore(needle));
+		Assert.Equal(badValue, badValue.CutSpanBefore(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanBefore(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanBefore(needle, out trySpanResult));
@@ -673,8 +673,8 @@ public class StringUtilsExtTests
 		int tryWritten;
 
 		// string for value
-		Assert.Null(badValue.CutBeforeLast(needle));
-		Assert.Null(badValue.CutBeforeLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.CutBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutBeforeLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.CutBeforeLast(needle));
 		Assert.Equal(result, value.CutBeforeLast(needle, StringPool.Shared));
@@ -699,7 +699,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanBeforeLast(needle));
 		Assert.Equal(result, value.CutSpanBeforeLast(needle));
 
 		Assert.False(badValue.TryCutSpanBeforeLast(needle, out trySpanResult));
@@ -709,8 +709,8 @@ public class StringUtilsExtTests
 		Assert.Equal(result, trySpanResult);
 
 		// span for value
-		Assert.Null(badValue.AsSpan().CutBeforeLast(needle));
-		Assert.Null(badValue.AsSpan().CutBeforeLast(needle, StringPool.Shared));
+		Assert.Equal(badValue, badValue.AsSpan().CutBeforeLast(needle));
+		Assert.Equal(badValue, badValue.AsSpan().CutBeforeLast(needle, StringPool.Shared));
 
 		Assert.Equal(result, value.AsSpan().CutBeforeLast(needle));
 		Assert.Equal(result, value.AsSpan().CutBeforeLast(needle, StringPool.Shared));
@@ -735,7 +735,7 @@ public class StringUtilsExtTests
 		Assert.Equal(result, resultSpan);
 		Assert.Equal(resultSpan.Length, tryWritten);
 
-		Assert.Equal(default, badValue.CutSpanBeforeLast(needle));
+		Assert.Equal(badValue, badValue.CutSpanBeforeLast(needle));
 		Assert.Equal(result, value.AsSpan().CutSpanBeforeLast(needle));
 
 		Assert.False(badValue.AsSpan().TryCutSpanBeforeLast(needle, out trySpanResult));

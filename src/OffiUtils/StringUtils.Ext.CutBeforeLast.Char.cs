@@ -6,10 +6,10 @@ namespace OffiUtils;
 
 public static partial class StringUtils
 {
-	public static string? CutBeforeLast(this string value, char needle, StringPool? pool = null)
-		=> TryCutBeforeLast(value.AsSpan(), needle, pool, out var result) ? result : null;
-	public static string? CutBeforeLast(this ReadOnlySpan<char> value, char needle, StringPool? pool = null)
-		=> TryCutBeforeLast(value, needle, pool, out var result) ? result : null;
+	public static string CutBeforeLast(this string value, char needle, StringPool? pool = null)
+		=> TryCutBeforeLast(value.AsSpan(), needle, pool, out var result) ? result : value;
+	public static string CutBeforeLast(this ReadOnlySpan<char> value, char needle, StringPool? pool = null)
+		=> TryCutBeforeLast(value, needle, pool, out var result) ? result : value.ToString();
 
 	public static bool TryCutBeforeLast(this string value, char needle, [NotNullWhen(true)] out string? result)
 		=> TryCutBeforeLast(value.AsSpan(), needle, null, out result);
@@ -42,9 +42,9 @@ public static partial class StringUtils
 	}
 
 	public static ReadOnlySpan<char> CutSpanBeforeLast(this string value, char needle)
-		=> TryCutSpanBeforeLast(value.AsSpan(), needle, out var cutValue) ? cutValue : default;
+		=> TryCutSpanBeforeLast(value.AsSpan(), needle, out var cutValue) ? cutValue : value;
 	public static ReadOnlySpan<char> CutSpanBeforeLast(this ReadOnlySpan<char> value, char needle)
-		=> TryCutSpanBeforeLast(value, needle, out var cutValue) ? cutValue : default;
+		=> TryCutSpanBeforeLast(value, needle, out var cutValue) ? cutValue : value;
 
 	public static bool TryCutSpanBeforeLast(this string value, char needle, out ReadOnlySpan<char> cutValue)
 		=> TryCutSpanBeforeLast(value.AsSpan(), needle, out cutValue);
