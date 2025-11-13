@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Packages.props" />
+  </Folder>
   <Project Path="OffiUtils.Playground/OffiUtils.Playground.csproj" />
   <Project Path="OffiUtils.Tests/OffiUtils.Tests.csproj" />
   <Project Path="OffiUtils/OffiUtils.csproj" />
