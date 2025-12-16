@@ -19,10 +19,27 @@ public static partial class StringUtils
 
     public static string FastAllocate(int length) => string.Create(length, length, FastAllocateCreateAction);
 
-#if NET10_0_OR_GREATER
-    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
     public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes);
+#if NET9_0_OR_GREATER
+    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(bytes);
+#else
+    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, _lookup32LowerPtr);
 
+    private static string BytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr)
+    {
+        string result = FastAllocate(bytes.Length * sizeof(char));
+        Span<uint> resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
+        Span<uint> lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
+
+        for (int i = 0; i < resultSpan32.Length; i++)
+        {
+            resultSpan32[i] = lookupSpan[bytes[i]];
+        }
+
+        return result;
+    }
+#endif
+#if NET10_0_OR_GREATER
     public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexStringLower(bytes, destination, out charsWritten);
     public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => Convert.TryToHexString(bytes, destination, out charsWritten);
 #else
@@ -47,20 +64,6 @@ public static partial class StringUtils
         return ptr;
     }
 
-    private static string BytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr)
-    {
-        string result = FastAllocate(bytes.Length * sizeof(char));
-        Span<uint> resultSpan32 = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref Unsafe.As<char, uint>(ref result.GetRawData()), bytes.Length);
-        Span<uint> lookupSpan = MemoryUtils.GetSpan<uint>(lookupPtr, 256);
-
-        for (int i = 0; i < resultSpan32.Length; i++)
-        {
-            resultSpan32[i] = lookupSpan[bytes[i]];
-        }
-
-        return result;
-    }
-
     private static bool TryWriteBytesToHex(ReadOnlySpan<byte> bytes, nint lookupPtr, Span<char> destination, out int charsWritten)
     {
         int charsToWrite = bytes.Length * 2;
@@ -81,9 +84,6 @@ public static partial class StringUtils
         charsWritten = charsToWrite;
         return true;
     }
-
-    public static string BytesToHexLower(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, _lookup32LowerPtr);
-    public static string BytesToHexUpper(ReadOnlySpan<byte> bytes) => BytesToHex(bytes, _lookup32UpperPtr);
 
     public static bool TryWriteBytesToHexLower(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, _lookup32LowerPtr, destination, out charsWritten);
     public static bool TryWriteBytesToHexUpper(ReadOnlySpan<byte> bytes, Span<char> destination, out int charsWritten) => TryWriteBytesToHex(bytes, _lookup32UpperPtr, destination, out charsWritten);
