@@ -1,11 +1,13 @@
-﻿using System.Collections.Frozen;
+﻿using System.Collections;
+using System.Collections.Frozen;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 
 namespace OffiUtils;
 
 [Experimental(DiagnosticIds.ExperimentalIDecompressor)]
-public interface IDecompressor
+public interface IDecompressor : IReadOnlyDictionary<CompressionAlgorithm, DecompressDelegate>
 {
     /// <summary>
     /// Attempts to decompress the source buffer into the destination buffer.
@@ -100,18 +102,47 @@ public sealed class DecompressorBuilder
     public static DecompressorBuilder DefaultWithOodlePort => Default
         .Add(CompressionAlgorithm.Oodle, OodleDecompressor.TryDecompress);
 
-    public DecompressorBuilder Add(CompressionAlgorithm algorithm, DecompressDelegate implementation)
+    public DecompressorBuilder AddRange(IEnumerable<KeyValuePair<CompressionAlgorithm, DecompressDelegate>> values, bool replace = false)
     {
-        ArgumentNullException.ThrowIfNull(implementation);
-        _handlers[algorithm] = implementation;
+        ArgumentNullException.ThrowIfNull(values);
+        foreach ((CompressionAlgorithm algorithm, DecompressDelegate implementation) in values)
+        {
+            Add(algorithm, implementation, replace);
+        }
         return this;
     }
 
-    public DecompressorBuilder Add<TState>(CompressionAlgorithm algorithm, TState state, DecompressDelegate<TState> implementation)
+    public DecompressorBuilder Add(CompressionAlgorithm algorithm, DecompressDelegate implementation, bool replace = false)
     {
         ArgumentNullException.ThrowIfNull(implementation);
-        var wrapper = new DelegateStateWrapper<TState>(state, implementation);
-        _handlers[algorithm] = wrapper.Invoke;
+        if (replace)
+        {
+            _handlers[algorithm] = implementation;
+        }
+        else
+        {
+            _handlers.TryAdd(algorithm, implementation);
+        }
+        return this;
+    }
+
+    public DecompressorBuilder Add<TState>(CompressionAlgorithm algorithm, TState state, DecompressDelegate<TState> implementation, bool replace = false)
+    {
+        ArgumentNullException.ThrowIfNull(implementation);
+        if (replace)
+        {
+            var wrapper = new DelegateStateWrapper<TState>(state, implementation);
+            _handlers[algorithm] = wrapper.Invoke;
+        }
+        else
+        {
+            ref DecompressDelegate? valOrDefault = ref CollectionsMarshal.GetValueRefOrAddDefault(_handlers, algorithm, out bool exists);
+            if (!exists)
+            {
+                var wrapper = new DelegateStateWrapper<TState>(state, implementation);
+                valOrDefault = wrapper.Invoke;
+            }
+        }
         return this;
     }
 
@@ -237,5 +268,20 @@ public sealed class DecompressorBuilder
 
             throw new NotSupportedException($"Decompression algorithm '{algorithm}' has not been registered with this decompressor.");
         }
+
+        public IEnumerator<KeyValuePair<CompressionAlgorithm, DecompressDelegate>> GetEnumerator() => _decompressors.GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator() => _decompressors.GetEnumerator();
+
+        public int Count => _decompressors.Count;
+        public bool ContainsKey(CompressionAlgorithm key) => _decompressors.ContainsKey(key);
+
+        public bool TryGetValue(CompressionAlgorithm key, [MaybeNullWhen(false)] out DecompressDelegate value)
+            => _decompressors.TryGetValue(key, out value);
+
+        public DecompressDelegate this[CompressionAlgorithm key] => _decompressors[key];
+
+        public IEnumerable<CompressionAlgorithm> Keys => _decompressors.Keys;
+        public IEnumerable<DecompressDelegate> Values => _decompressors.Values;
     }
 }
