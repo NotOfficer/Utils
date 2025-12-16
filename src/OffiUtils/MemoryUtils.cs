@@ -32,6 +32,15 @@ public class MemoryUtils
         return MemoryMarshal.CreateSpan(ref reference, readonlySpan.Length);
     }
 
+    public static unsafe UnmanagedMemoryStream ToMemoryStream<T>(Span<T> span, FileAccess fileAccess = FileAccess.Read) where T : struct
+    {
+        if (span.IsEmpty) return new UnmanagedMemoryStream((byte*)null, 0, 0, fileAccess);
+        ref T reference = ref MemoryMarshal.GetReference(span);
+        byte* pointer = (byte*)Unsafe.AsPointer(ref reference);
+        int byteLength = span.Length * Unsafe.SizeOf<T>();
+        return new UnmanagedMemoryStream(pointer, byteLength, byteLength, fileAccess);
+    }
+
     // ReSharper disable once InconsistentNaming
     public static void FreeGCHandleIfValid(ref nint ptr)
     {
@@ -43,7 +52,6 @@ public class MemoryUtils
 
     public static void FreeLibraryIfValid(ref nint handle)
     {
-        if (handle == nint.Zero) return;
         NativeLibrary.Free(handle);
         handle = nint.Zero;
     }
