@@ -2,14 +2,12 @@
 // huge shoutouts to claude opus 4.5
 
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-
-namespace OffiUtils;
-
-using System;
 using System.Runtime.InteropServices;
 
+namespace OffiUtils;
 
 [Experimental(DiagnosticIds.ExperimentalOodlePort)]
 public static unsafe class OodleDecompressor
