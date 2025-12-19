@@ -1873,7 +1873,11 @@ public static unsafe class OodleDecompressor
                 }
                 continue_outer:;
             }
-            
+
+            // Final advance (normalize bitc before saving)
+            bitp0 += (int)(bitc0 >> 3); bitc0 &= 7;
+            bitp1 -= (int)(bitc1 >> 3); bitc1 &= 7;
+
             s.offs_u8 = offs_u8;
             s.neg_offs_s32 = neg_offs_s32;
             s.bitp[0] = (ulong)bitp0;
@@ -1930,16 +1934,18 @@ public static unsafe class OodleDecompressor
             {
                 int num_raw = (packed >> 4) + OFFSET_RAW_BITS;
                 bitc0 += (uint)num_raw;
-                int offs_raw_bits = (int)((bits0 >> (int)(64 - bitc0)) & ((1UL << num_raw) - 1));
-                offs = ((offs_raw_bits + (1 << num_raw)) << 4) + (1 << 4) + (packed & 0xf) - (1 << (OFFSET_RAW_BITS + 4)) + NEWLZ_MIN_OFFSET;
+                int mask = (1 << num_raw) - 1;
+                int offs_raw_bits = (int)((bits0 >> (int)(64 - bitc0)) & (ulong)mask);
+                offs = ((offs_raw_bits + mask) << 4) + (1 << 4) + (packed & 0xf) - (1 << (OFFSET_RAW_BITS + 4)) + NEWLZ_MIN_OFFSET;
             }
             else
             {
                 int num_raw = (packed - 0xf0) + 16;
                 if (num_raw >= 30) return 0;
                 bitc0 += (uint)num_raw;
-                int offs_raw_bits = (int)((bits0 >> (int)(64 - bitc0)) & ((1UL << num_raw) - 1));
-                offs = offs_raw_bits + (1 << num_raw) + 1 + ESCAPE_OFFSET_BIAS;
+                int mask = (1 << num_raw) - 1;
+                int offs_raw_bits = (int)((bits0 >> (int)(64 - bitc0)) & (ulong)mask);
+                offs = offs_raw_bits + mask + 1 + ESCAPE_OFFSET_BIAS;
                 if (offs >= NEWLZ_MAX_OFFSET) return 0;
             }
             *neg_offs_s32++ = -offs;
@@ -1951,16 +1957,18 @@ public static unsafe class OodleDecompressor
                 {
                     int num_raw = (packed >> 4) + OFFSET_RAW_BITS;
                     bitc1 += (uint)num_raw;
-                    int offs_raw_bits = (int)((bits1 >> (int)(64 - bitc1)) & ((1UL << num_raw) - 1));
-                    offs = ((offs_raw_bits + (1 << num_raw)) << 4) + (1 << 4) + (packed & 0xf) - (1 << (OFFSET_RAW_BITS + 4)) + NEWLZ_MIN_OFFSET;
+                    int mask = (1 << num_raw) - 1;
+                    int offs_raw_bits = (int)((bits1 >> (int)(64 - bitc1)) & (ulong)mask);
+                    offs = ((offs_raw_bits + mask) << 4) + (1 << 4) + (packed & 0xf) - (1 << (OFFSET_RAW_BITS + 4)) + NEWLZ_MIN_OFFSET;
                 }
                 else
                 {
                     int num_raw = (packed - 0xf0) + 16;
                     if (num_raw >= 30) return 0;
                     bitc1 += (uint)num_raw;
-                    int offs_raw_bits = (int)((bits1 >> (int)(64 - bitc1)) & ((1UL << num_raw) - 1));
-                    offs = offs_raw_bits + (1 << num_raw) + 1 + ESCAPE_OFFSET_BIAS;
+                    int mask = (1 << num_raw) - 1;
+                    int offs_raw_bits = (int)((bits1 >> (int)(64 - bitc1)) & (ulong)mask);
+                    offs = offs_raw_bits + mask + 1 + ESCAPE_OFFSET_BIAS;
                     if (offs >= NEWLZ_MAX_OFFSET) return 0;
                 }
                 *neg_offs_s32++ = -offs;
@@ -2571,11 +2579,12 @@ public static unsafe class OodleDecompressor
                     offsets[i] = offsets[i] * (int)offset_alt_modulo - (int)offsets_u8_2[i];
                 }
             }
-            
-            // Verify offsets after decoding (for chunk with 834+ offsets)
-            if (offsets_count >= 834)
+
+            // Verify offsets after decoding - log offset around index 126
+            if (offsets_count > 126)
             {
-                LogOodle($"After offset decode, offsets[832..834]={offsets[832]},{offsets[833]},{offsets[834]} count={offsets_count}");
+                LogOodle($"After offset decode, offsets[125..128]={offsets[125]},{offsets[126]},{offsets[127]},{(offsets_count > 128 ? offsets[128].ToString() : "N/A")} count={offsets_count}");
+                LogOodle($"After offset decode, offs_u8[125..128]=0x{offsets_u8[125]:X2},0x{offsets_u8[126]:X2},0x{offsets_u8[127]:X2}");
             }
             
             if (decode_ok == 0) 
@@ -5227,11 +5236,18 @@ public static unsafe class OodleDecompressor
             }
             
             if (to_ptr + lrl > match_zone_end) return false;
-            
-            // Debug around byte 84
-            if (out_pos <= 90 && out_pos + lrl >= 80)
+
+            // Debug near error position (63476)
+            if (out_pos >= 63400 && out_pos <= 63550)
             {
-                LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl}(orig={orig_lrl}) ml={packet_ml+2} offset_type={packet_offset} neg_offset={neg_offset} lit_idx={literals_ptr - literals_start}");
+                LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl}(orig={orig_lrl}) ml={packet_ml+2} offset_type={packet_offset} neg_offset={neg_offset} lit_idx={literals_ptr - literals_start} pending_offset={*offsets_ptr}");
+                if (lrl > 0)
+                {
+                    LogOodle($"  LitCopy: dst_before[0..3]={to_ptr[0]:X2} {to_ptr[1]:X2} {to_ptr[2]:X2} {to_ptr[3]:X2}");
+                    LogOodle($"  LitCopy: lit[0..3]={literals_ptr[0]:X2} {literals_ptr[1]:X2} {literals_ptr[2]:X2} {literals_ptr[3]:X2}");
+                    byte* sub_src = to_ptr + neg_offset;
+                    LogOodle($"  LitCopy: sub_src[0..3] @ {(sub_src - chunk_base)}={sub_src[0]:X2} {sub_src[1]:X2} {sub_src[2]:X2} {sub_src[3]:X2}");
+                }
             }
             
             if (isSub)
@@ -5254,6 +5270,11 @@ public static unsafe class OodleDecompressor
             
             if (packet_offset == 3)
             {
+                if (out_pos >= 63400 && out_pos <= 63550)
+                {
+                    long offset_idx = offsets_ptr - offsets;
+                    LogOodle($"  Using offset[{offset_idx}] = {offsets[offset_idx]}");
+                }
                 offsets_ptr++;
             }
             
@@ -5270,12 +5291,12 @@ public static unsafe class OodleDecompressor
                 if (to_ptr + ml > match_end) return false;
                 
                 byte* match_src = to_ptr + neg_offset;
-                
-                // Debug around byte 84
+
+                // Debug near error position (63476)
                 out_pos = to_ptr - chunk_base;
-                if (out_pos <= 90 && out_pos + ml >= 80)
+                if (out_pos >= 63400 && out_pos <= 63550)
                 {
-                    LogOodle($"  Match[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
+                    LogOodle($"  ExcessMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
                 }
                 
                 // Use SIMD match copy
@@ -5286,12 +5307,12 @@ public static unsafe class OodleDecompressor
             {
                 // Short match (<= 16) - use two 64-bit copies
                 byte* match_src = to_ptr + neg_offset;
-                
-                // Debug around byte 84
+
+                // Debug near error position (63476)
                 out_pos = to_ptr - chunk_base;
-                if (out_pos <= 90 && out_pos + ml >= 80)
+                if (out_pos >= 63400 && out_pos <= 63550)
                 {
-                    LogOodle($"  Match[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
+                    LogOodle($"  ShortMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
                 }
                 
                 *(ulong*)to_ptr = *(ulong*)match_src;
