@@ -2366,22 +2366,27 @@ public static unsafe class OodleDecompressor
     private static void rrVarBits_RefillBack_Safe(ref rrVarBits vb)
     {
         int bitlen = 63 - vb.m_inv_bitlen;
-        // Fast path: read 8 bytes at once when possible (reading backwards)
-        if (bitlen <= 0 && vb.m_cur - 8 >= vb.m_end)
+        int bytes_consumed = (63 - bitlen) >> 3;
+        
+        // Read 8 bytes BEFORE current position (not from current position)
+        if (vb.m_cur - 8 >= vb.m_end)
         {
-            vb.m_cur -= 8;
-            vb.m_bits = *(ulong*)vb.m_cur; // Already in little-endian order for backward
-            vb.m_inv_bitlen = -1;
-            return;
+            ulong next = *(ulong*)(vb.m_cur - 8);
+            vb.m_bits |= next >> bitlen;
+            vb.m_cur -= bytes_consumed;
+            vb.m_inv_bitlen -= bytes_consumed << 3;
         }
-        // Slow path: byte by byte
-        while (bitlen <= 56)
+        else
         {
-            if (vb.m_cur <= vb.m_end) break; // m_end is start of buffer for backward reader
-            vb.m_cur--;
-            vb.m_bits |= (ulong)(*vb.m_cur) << (56 - bitlen);
-            bitlen += 8;
-            vb.m_inv_bitlen -= 8;
+            // Slow path: byte by byte when we're too close to the start
+            while (bitlen <= 56)
+            {
+                if (vb.m_cur <= vb.m_end) break;
+                vb.m_cur--;
+                vb.m_bits |= (ulong)(*vb.m_cur) << (56 - bitlen);
+                bitlen += 8;
+                vb.m_inv_bitlen -= 8;
+            }
         }
     }
 
@@ -5388,10 +5393,28 @@ public static unsafe class OodleDecompressor
             packet_num++;
         }
 
+        // Check whether we consumed all offsets and excesses
+        if (offsets_ptr != offsets + offsets_count)
+        {
+            return false;
+        }
+        if (excesses_ptr != excesses + excesses_count)
+        {
+            return false;
+        }
         // Final literals
         if (to_ptr < chunk_end)
         {
             int lrl = (int)(chunk_end - to_ptr);
+            long lit_consumed = literals_ptr - literals_start;
+            long lit_remaining = arrays.literals_count - lit_consumed;
+            
+            // Check: the final literal run should consume exactly all remaining literals
+            if (lit_remaining != lrl)
+            {
+                return false;
+            }
+            
             if (isSub)
             {
                 // Use SIMD SUB copy
