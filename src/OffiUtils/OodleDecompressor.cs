@@ -3617,12 +3617,22 @@ public static unsafe class OodleDecompressor
                             return -1;
                         }
                         int offset = (int)(*arrays.escape_offsets_ptr++);
-                        neg_offset = -offset;
 
-                        byte* match_ptr = to_ptr + neg_offset;
-                        if (match_ptr < window_base) return -1;
+                        // IMPORTANT: escape offsets are relative to chunk_ptr, not to_ptr!
+                        byte* match_ptr = chunk_ptr - offset;
+                        neg_offset = (int)(match_ptr - to_ptr);
 
-                        CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                        H.LogOodle($"  offset={offset} chunk_ptr-window={chunk_ptr - window_base} match_ptr-window={match_ptr - window_base} neg_offset={neg_offset}");
+                        if (match_ptr < window_base)
+                        {
+                            H.LogOodle($"  ERROR: match_ptr < window_base! offset={offset} neg_offset={neg_offset}");
+                            return -1;
+                        }
+
+                        // Debug: show what we're copying
+                        H.LogOodle($"  Copying match: src[0..7]={match_ptr[0]:X2} {match_ptr[1]:X2} {match_ptr[2]:X2} {match_ptr[3]:X2} {match_ptr[4]:X2} {match_ptr[5]:X2} {match_ptr[6]:X2} {match_ptr[7]:X2}");
+
+                        H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
                         to_ptr += ml;
                     }
                 }
