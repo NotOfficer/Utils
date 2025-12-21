@@ -1,43 +1,50 @@
 ﻿// this code is fully vibe ported/coded from the oodle c++ sdk
 // huge shoutouts to claude opus 4.5
 
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 
 namespace OffiUtils;
 
-[Experimental(DiagnosticIds.ExperimentalOodlePort)]
-public static unsafe class OodleDecompressor
+file static unsafe class H // static Helpers class
 {
     [Conditional("DEBUG_OODLE_LOGGING")]
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void LogOodle(string message)
+    public static void LogOodle(string message)
     {
         Console.WriteLine($"[Oodle] {message}");
     }
 
-    // Thread-local scratch memory pool to avoid allocation overhead per decompression
-    [ThreadStatic]
-    private static byte[]? _scratchPool;
-    private const int SCRATCH_POOL_SIZE = 3 * 1024 * 1024; // 3MB
-
     // Fast copy helpers - use Span.CopyTo which is SIMD optimized internally
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CopyBytes_SIMD(byte* dst, byte* src, int count)
+    public static void CopyBytes_SIMD(byte* dst, byte* src, int count)
     {
         new ReadOnlySpan<byte>(src, count).CopyTo(new Span<byte>(dst, count));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CopyMatch_SIMD(byte* dst, byte* src, int count, int offset)
+    public static void CopyMatch_SIMD(byte* dst, byte* src, int count, int offset)
     {
         // For non-overlapping copies (offset >= count), use Span.CopyTo
         if (offset >= count)
         {
             new ReadOnlySpan<byte>(src, count).CopyTo(new Span<byte>(dst, count));
+        }
+        else if (offset >= 32 && Avx.IsSupported)
+        {
+            // Overlapping but offset >= 32: safe to use 32-byte AVX copies
+            while (count >= 32) 
+            { 
+                Avx.Store(dst, Avx.LoadVector256(src)); 
+                dst += 32; src += 32; count -= 32; 
+            }
+            while (count >= 8) { *(ulong*)dst = *(ulong*)src; dst += 8; src += 8; count -= 8; }
+            while (count-- > 0) *dst++ = *src++;
         }
         else if (offset >= 8)
         {
@@ -53,15 +60,29 @@ public static unsafe class OodleDecompressor
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void CopySub_SIMD(byte* dst, byte* literals, byte* match, int count)
+    public static void CopySub_SIMD(byte* dst, byte* literals, byte* match, int count)
     {
         // SUB mode: dst[i] = literals[i] + match[i] (byte addition with wrap)
         // IMPORTANT: match may point to dst + neg_offset (where neg_offset is negative)
         // This creates an overlap situation. The minimum offset is 8, so we can safely
         // copy 8 bytes at a time without reading bytes we just wrote.
 
-        // Process 8 bytes at a time (safe even with minimum offset of 8)
         int i = 0;
+
+        // Use AVX2 for 32 bytes at a time when the offset is large enough
+        if (Avx2.IsSupported && count >= 32 && (dst - match) >= 32)
+        {
+            while (i + 32 <= count)
+            {
+                var lit = Avx.LoadVector256(literals + i);
+                var mat = Avx.LoadVector256(match + i);
+                var sum = Avx2.Add(lit, mat);
+                Avx.Store(dst + i, sum);
+                i += 32;
+            }
+        }
+
+        // Process 8 bytes at a time (safe even with minimum offset of 8)
         while (i + 8 <= count)
         {
             // Read 8 bytes from literals and match, add them, write to dst
@@ -87,10 +108,79 @@ public static unsafe class OodleDecompressor
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void FillBytes(byte* dst, byte value, int count)
+    public static void FillBytes(byte* dst, byte value, int count)
     {
         new Span<byte>(dst, count).Fill(value);
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Bswap32(uint x) => BinaryPrimitives.ReverseEndianness(x);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong Bswap64(ulong x) => BinaryPrimitives.ReverseEndianness(x);
+
+    // Read big-endian uint32 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint ReadU32BE(byte* p) => Bswap32(*(uint*)p);
+
+    // Read little-endian uint32 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint ReadU32LE(byte* p) => *(uint*)p;
+
+    // Read big-endian uint64 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong ReadU64BE(byte* p) => Bswap64(*(ulong*)p);
+
+    // Read little-endian uint64 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong ReadU64LE(byte* p) => *(ulong*)p;
+
+    // Read little-endian uint16 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ushort ReadU16LE(byte* p) => *(ushort*)p;
+
+    // Read big-endian uint16 from unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ushort ReadU16BE(byte* p) => BinaryPrimitives.ReverseEndianness(*(ushort*)p);
+
+    // Read big-endian 24-bit value from unaligned pointer (returns uint32)
+    // Read 32 bits, swap endianness, shift right 8 to get upper 24 bits
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint ReadU24BE(byte* p) => Bswap32(*(uint*)p) >> 8;
+
+    // Read little-endian 24-bit value from unaligned pointer (returns uint32)
+    // Just mask off the upper byte after reading 32 bits
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint ReadU24LE(byte* p) => *(uint*)p & 0xFFFFFF;
+
+    // Write little-endian uint32 to unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteU32LE(byte* p, uint value) => *(uint*)p = value;
+
+    // Write little-endian uint64 to unaligned pointer
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteU64LE(byte* p, ulong value) => *(ulong*)p = value;
+
+    // Write 5 bytes from separate uint values (packed as little-endian)
+    // Writes: b0, b1, b2, b3, b4 to p[0..4]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Write5BytesLE(byte* p, uint b0, uint b1, uint b2, uint b3, uint b4)
+    {
+        // Pack 4 bytes into one uint write
+        uint packed4 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        *(uint*)p = packed4;
+        p[4] = (byte)b4;
+    }
+}
+
+[Experimental(DiagnosticIds.ExperimentalOodlePort)]
+[SkipLocalsInit]
+public static unsafe class OodleDecompressor
+{
+    // Thread-local scratch memory pool to avoid allocation overhead per decompression
+    [ThreadStatic]
+    private static byte[]? _scratchPool;
+    private const int SCRATCH_POOL_SIZE = 3 * 1024 * 1024; // 3MB
 
     static OodleDecompressor()
     {
@@ -445,7 +535,7 @@ public static unsafe class OodleDecompressor
         return (ulong)(vb.m_cur - start - (bitlen >> 3));
     }
 
-    private static readonly byte[] tab_data = [
+    private static ReadOnlySpan<byte> tab_data => [
         0x00, 0x20, 0x10, 0x30, 0x08, 0x28, 0x18, 0x38,
         0x04, 0x24, 0x14, 0x34, 0x0c, 0x2c, 0x1c, 0x3c,
         0x02, 0x22, 0x12, 0x32, 0x0a, 0x2a, 0x1a, 0x3a,
@@ -456,10 +546,10 @@ public static unsafe class OodleDecompressor
         0x07, 0x27, 0x17, 0x37, 0x0f, 0x2f, 0x1f, 0x3f
     ];
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint newlz_huff_bitreverse(uint x)
     {
-        ReadOnlySpan<byte> tab = tab_data;
-        return (uint)((tab[(int)(x & 0x3f)] << 5) | tab[(int)(x >> 5)]);
+        return (uint)((tab_data[(int)(x & 0x3f)] << 5) | tab_data[(int)(x >> 5)]);
     }
 
     private static uint newlz_decode_packhuff8_runlen(ref rrVarBits vb)
@@ -576,7 +666,7 @@ public static unsafe class OodleDecompressor
         {
             int num_eg_bound = Math.Min(num_syms, 257 - num_syms) * 2;
 
-            int nbits = 32 - System.Numerics.BitOperations.LeadingZeroCount((uint)(num_eg_bound - 1));
+            int nbits = 32 - BitOperations.LeadingZeroCount((uint)(num_eg_bound - 1));
             int large_thresh = (1 << nbits) - num_eg_bound;
             int peek = (int)rrVarBits_Peek(ref vb, nbits);
             if ((peek >> 1) < large_thresh)
@@ -686,7 +776,6 @@ public static unsafe class OodleDecompressor
 
         int numUnary = gotNumSyms + numEG;
         byte* unary = stackalloc byte[527];
-        new Span<byte>(unary, 527).Clear();
 
         if (newLZ_decode_unary_block(unary, numUnary, ref bbr) != numUnary) return -1;
 
@@ -894,7 +983,7 @@ public static unsafe class OodleDecompressor
 
             if (in0 > in2)
             {
-                LogOodle($"newlz_huff64: half={half} in0 > in2");
+                H.LogOodle($"newlz_huff64: half={half} in0 > in2");
                 return false;
             }
 
@@ -902,16 +991,16 @@ public static unsafe class OodleDecompressor
             byte* decodeend = (byte*)s->decodeend[0];
             byte* strm0_end = (byte*)s->strm0_end[0];
 
-            LogOodle($"newlz_huff64: half={half} decodeend-decodeptr={decodeend - decodeptr}");
+            H.LogOodle($"newlz_huff64: half={half} decodeend-decodeptr={decodeend - decodeptr}");
 
             // Fast path: when we have plenty of buffer space, use bulk reads
             byte* decodeend_fast = decodeend - 5; // Leave room for 6 symbols
             while (decodeptr < decodeend_fast && in2 - in0 >= 4 && in1 - in2 >= 4)
             {
                 // Bulk refill all streams using 32-bit reads
-                bits0 |= ReadU32LE(in0) << (int)bitc0;
-                bits1 |= ReadU32BE(in1 - 4) << (int)bitc1;
-                bits2 |= ReadU32LE(in2) << (int)bitc2;
+                bits0 |= H.ReadU32LE(in0) << (int)bitc0;
+                bits1 |= H.ReadU32BE(in1 - 4) << (int)bitc1;
+                bits2 |= H.ReadU32LE(in2) << (int)bitc2;
 
                 // Decode 6 symbols (2 from each stream)
                 ushort e0 = table[bits0 & 2047];
@@ -971,7 +1060,7 @@ public static unsafe class OodleDecompressor
                 // Only refill when we can safely read
                 if (in2 - in0 > 1)
                 {
-                    bits0 |= (uint)ReadU16LE(in0) << (int)bitc0;
+                    bits0 |= (uint)H.ReadU16LE(in0) << (int)bitc0;
                 }
                 else if (in2 - in0 == 1)
                 {
@@ -986,7 +1075,7 @@ public static unsafe class OodleDecompressor
 
                 if (bitc0 + (uint)Math.Min(in2 - in0, 2) * 8 < cl)
                 {
-                    LogOodle($"newlz_huff64: half={half} stream0 not enough bits: bitc0={bitc0} available={(uint)Math.Min(in2 - in0, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream0 not enough bits: bitc0={bitc0} available={(uint)Math.Min(in2 - in0, 2) * 8} cl={cl}");
                     return false;
                 }
 
@@ -1002,9 +1091,9 @@ public static unsafe class OodleDecompressor
                 if (in1 - in2 > 1)
                 {
                     // bits1 reads backward from in1
-                    bits1 |= (uint)ReadU16BE(in1 - 2) << (int)bitc1;
+                    bits1 |= (uint)H.ReadU16BE(in1 - 2) << (int)bitc1;
                     // bits2 reads forward from in2
-                    bits2 |= (uint)ReadU16LE(in2) << (int)bitc2;
+                    bits2 |= (uint)H.ReadU16LE(in2) << (int)bitc2;
                 }
                 else if (in1 - in2 == 1)
                 {
@@ -1021,7 +1110,7 @@ public static unsafe class OodleDecompressor
 
                 if (bitc1 + (uint)Math.Min(in1 - in2, 2) * 8 < cl)
                 {
-                    LogOodle($"newlz_huff64: half={half} stream1 not enough bits: bitc1={bitc1} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream1 not enough bits: bitc1={bitc1} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
                     return false;
                 }
 
@@ -1041,7 +1130,7 @@ public static unsafe class OodleDecompressor
 
                 if (bitc2 + (uint)Math.Min(in1 - in2, 2) * 8 < cl)
                 {
-                    LogOodle($"newlz_huff64: half={half} stream2 not enough bits: bitc2={bitc2} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream2 not enough bits: bitc2={bitc2} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
                     return false;
                 }
 
@@ -1054,7 +1143,7 @@ public static unsafe class OodleDecompressor
                 // Corruption check
                 if (in0 > in2 || in2 > in1)
                 {
-                    LogOodle($"newlz_huff64: half={half} stream crossing: in0={((long)in0):X} in2={((long)in2):X} in1={((long)in1):X}");
+                    H.LogOodle($"newlz_huff64: half={half} stream crossing: in0={((long)in0):X} in2={((long)in2):X} in1={((long)in1):X}");
                     return false;
                 }
             }
@@ -1066,13 +1155,13 @@ public static unsafe class OodleDecompressor
 
             if (decodeptr != decodeend)
             {
-                LogOodle($"newlz_huff64: half={half} decodeptr != decodeend");
+                H.LogOodle($"newlz_huff64: half={half} decodeptr != decodeend");
                 return false;
             }
 
             if (in0 != (byte*)s->strm0_end[0] || in1 != in2)
             {
-                LogOodle($"newlz_huff64: half={half} stream end mismatch in0={((long)in0):X} strm0_end={s->strm0_end[0]:X} in1={((long)in1):X} in2={((long)in2):X}");
+                H.LogOodle($"newlz_huff64: half={half} stream end mismatch in0={((long)in0):X} strm0_end={s->strm0_end[0]:X} in1={((long)in1):X} in2={((long)in2):X}");
                 return false;
             }
 
@@ -1093,49 +1182,9 @@ public static unsafe class OodleDecompressor
         return true;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint Bswap32(uint x) => System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(x);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong Bswap64(ulong x) => System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(x);
-
-    // Read big-endian uint32 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadU32BE(byte* p) => Bswap32(*(uint*)p);
-
-    // Read little-endian uint32 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadU32LE(byte* p) => *(uint*)p;
-
-    // Read big-endian uint64 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong ReadU64BE(byte* p) => Bswap64(*(ulong*)p);
-
-    // Read little-endian uint64 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong ReadU64LE(byte* p) => *(ulong*)p;
-
-    // Read little-endian uint16 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ushort ReadU16LE(byte* p) => *(ushort*)p;
-
-    // Read big-endian uint16 from unaligned pointer
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ushort ReadU16BE(byte* p) => System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(*(ushort*)p);
-
-    // Read big-endian 24-bit value from unaligned pointer (returns uint32)
-    // Read 32 bits, swap endianness, shift right 8 to get upper 24 bits
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadU24BE(byte* p) => Bswap32(*(uint*)p) >> 8;
-
-    // Read little-endian 24-bit value from unaligned pointer (returns uint32)
-    // Just mask off the upper byte after reading 32 bits
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadU24LE(byte* p) => *(uint*)p & 0xFFFFFF;
-
     private static long newlz_get_array_huff(byte* comp, long comp_len, byte* to, long to_len, bool is_huff6)
     {
-        LogOodle($"newlz_get_array_huff: comp_len={comp_len} to_len={to_len} is_huff6={is_huff6}");
+        H.LogOodle($"newlz_get_array_huff: comp_len={comp_len} to_len={to_len} is_huff6={is_huff6}");
         byte* comp_end = comp + comp_len;
         KrakenMSBHuffTab msbHuff;
 
@@ -1162,18 +1211,18 @@ public static unsafe class OodleDecompressor
 
         int gotNumSymbols;
         uint huff_type_flag1 = rrVarBits_Get1(ref vb);
-        LogOodle($"newlz_get_array_huff: huff_type_flag1={huff_type_flag1}");
+        H.LogOodle($"newlz_get_array_huff: huff_type_flag1={huff_type_flag1}");
         if (huff_type_flag1 != 0)
         {
             uint huff_type_flag2 = rrVarBits_Get1(ref vb);
-            LogOodle($"newlz_get_array_huff: huff_type_flag2={huff_type_flag2}");
+            H.LogOodle($"newlz_get_array_huff: huff_type_flag2={huff_type_flag2}");
             if (huff_type_flag2 == 0)
             {
                 gotNumSymbols = newlz_decode_hufflens2(ref vb, symListsBuf, lastSymOfLen);
             }
             else
             {
-                LogOodle($"newlz_get_array_huff: unsupported huff type (flag2=1)");
+                H.LogOodle($"newlz_get_array_huff: unsupported huff type (flag2=1)");
                 return -1;
             }
         }
@@ -1182,34 +1231,34 @@ public static unsafe class OodleDecompressor
             gotNumSymbols = newlz_decode_hufflens(ref vb, symListsBuf, lastSymOfLen);
         }
 
-        LogOodle($"newlz_get_array_huff: gotNumSymbols={gotNumSymbols}");
-        if (gotNumSymbols < 1) { LogOodle($"newlz_get_array_huff: gotNumSymbols < 1 returning -1"); return -1; }
+        H.LogOodle($"newlz_get_array_huff: gotNumSymbols={gotNumSymbols}");
+        if (gotNumSymbols < 1) { H.LogOodle($"newlz_get_array_huff: gotNumSymbols < 1 returning -1"); return -1; }
         else if (gotNumSymbols == 1)
         {
             byte val = symListsBuf[0];
-            FillBytes(to, val, (int)to_len);
+            H.FillBytes(to, val, (int)to_len);
 
             return (long)rrVarBits_GetSizeBytes(ref vb, comp);
         }
 
-        if (!newlz_build_msbfirst_table(firstSymOfLen, lastSymOfLen, &msbHuff, symListsBuf)) { LogOodle($"newlz_get_array_huff: build_msbfirst_table failed"); return -1; }
+        if (!newlz_build_msbfirst_table(firstSymOfLen, lastSymOfLen, &msbHuff, symListsBuf)) { H.LogOodle($"newlz_get_array_huff: build_msbfirst_table failed"); return -1; }
 
         int bitlen_at_end = 63 - vb.m_inv_bitlen;
         long header_size = (long)(vb.m_cur - comp - (bitlen_at_end >> 3));
         byte* comp_start = comp + header_size;
-        LogOodle($"newlz_get_array_huff: header_size={header_size} comp_end-comp_start={comp_end - comp_start}");
+        H.LogOodle($"newlz_get_array_huff: header_size={header_size} comp_end-comp_start={comp_end - comp_start}");
 
 
         KrakenHuffState s = new KrakenHuffState();
 
         if (!is_huff6)
         {
-            if (comp_end - comp_start < 3) { LogOodle($"newlz_get_array_huff: !huff6 comp_end-comp_start < 3"); return -1; }
+            if (comp_end - comp_start < 3) { H.LogOodle($"newlz_get_array_huff: !huff6 comp_end-comp_start < 3"); return -1; }
 
-            int comp_len1 = ReadU16LE(comp_start);
+            int comp_len1 = H.ReadU16LE(comp_start);
             comp_start += 2;
 
-            if (comp_end - comp_start < comp_len1 + 2) { LogOodle($"newlz_get_array_huff: !huff6 comp_end-comp_start < comp_len1 + 2"); return -1; }
+            if (comp_end - comp_start < comp_len1 + 2) { H.LogOodle($"newlz_get_array_huff: !huff6 comp_end-comp_start < comp_len1 + 2"); return -1; }
 
             s.decodeptr[0] = (ulong)to;
             s.decodeend[0] = (ulong)(to + to_len);
@@ -1223,48 +1272,48 @@ public static unsafe class OodleDecompressor
         {
             if (comp_end - comp_start < 6)
             {
-                LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_start < 6");
+                H.LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_start < 6");
                 return -1;
             }
 
             long first_half_to_len = (to_len + 1) >> 1;
 
-            uint first_half_len = ReadU24LE(comp_start);
+            uint first_half_len = H.ReadU24LE(comp_start);
             comp_start += 3;
-            LogOodle($"newlz_get_array_huff: huff6 first_half_len={first_half_len} first_half_to_len={first_half_to_len} comp_end-comp_start={comp_end - comp_start}");
+            H.LogOodle($"newlz_get_array_huff: huff6 first_half_len={first_half_len} first_half_to_len={first_half_to_len} comp_end-comp_start={comp_end - comp_start}");
 
             if (comp_end - comp_start < first_half_len)
             {
-                LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_start < first_half_len");
+                H.LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_start < first_half_len");
                 return -1;
             }
 
             byte* first_half_end = comp_start + first_half_len;
 
-            uint comp_str0len = ReadU16LE(comp_start);
+            uint comp_str0len = H.ReadU16LE(comp_start);
             comp_start += 2;
-            LogOodle($"newlz_get_array_huff: huff6 comp_str0len={comp_str0len} first_half_end-comp_start={first_half_end - comp_start}");
+            H.LogOodle($"newlz_get_array_huff: huff6 comp_str0len={comp_str0len} first_half_end-comp_start={first_half_end - comp_start}");
 
             if (first_half_end - comp_start < comp_str0len + 2)
             {
-                LogOodle($"newlz_get_array_huff: huff6 first_half_end-comp_start < comp_str0len + 2");
+                H.LogOodle($"newlz_get_array_huff: huff6 first_half_end-comp_start < comp_str0len + 2");
                 return -1;
             }
 
             byte* comp_mid = first_half_end;
             if (comp_end - comp_mid < 3)
             {
-                LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_mid < 3");
+                H.LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_mid < 3");
                 return -1;
             }
 
-            uint comp_str3len = ReadU16LE(comp_mid);
+            uint comp_str3len = H.ReadU16LE(comp_mid);
             comp_mid += 2;
-            LogOodle($"newlz_get_array_huff: huff6 comp_str3len={comp_str3len} comp_end-comp_mid={comp_end - comp_mid}");
+            H.LogOodle($"newlz_get_array_huff: huff6 comp_str3len={comp_str3len} comp_end-comp_mid={comp_end - comp_mid}");
 
             if (comp_end - comp_mid < comp_str3len + 2)
             {
-                LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_mid < comp_str3len + 2");
+                H.LogOodle($"newlz_get_array_huff: huff6 comp_end-comp_mid < comp_str3len + 2");
                 return -1;
             }
 
@@ -1283,9 +1332,9 @@ public static unsafe class OodleDecompressor
             s.bitp[5] = (ulong)(comp_mid + comp_str3len); s.bits[5] = 0; s.bitc[5] = 0;
         }
 
-        LogOodle($"newlz_get_array_huff: calling newlz_huff64");
-        if (newlz_huff64(&s, &msbHuff, is_huff6)) { LogOodle($"newlz_get_array_huff: huff64 succeeded"); return comp_len; }
-        LogOodle($"newlz_get_array_huff: huff64 failed");
+        H.LogOodle($"newlz_get_array_huff: calling newlz_huff64");
+        if (newlz_huff64(&s, &msbHuff, is_huff6)) { H.LogOodle($"newlz_get_array_huff: huff64 succeeded"); return comp_len; }
+        H.LogOodle($"newlz_get_array_huff: huff64 failed");
         return -1;
     }
 
@@ -1354,7 +1403,7 @@ public static unsafe class OodleDecompressor
 
         byte first_byte = *from_ptr;
         uint array_type = (uint)(first_byte >> 4);
-        LogOodle($"newLZ_get_arraylens: first_byte={first_byte:X2} array_type={array_type}");
+        H.LogOodle($"newLZ_get_arraylens: first_byte={first_byte:X2} array_type={array_type}");
 
         if (first_byte >= 0x80) // small flag
         {
@@ -1363,7 +1412,7 @@ public static unsafe class OodleDecompressor
             if (array_type == NEWLZ_ARRAY_TYPE_UNCOMPRESSED)
             {
                 // 2 byte header
-                uint header = ReadU16BE(from_ptr);
+                uint header = H.ReadU16BE(from_ptr);
                 from_ptr += 2;
 
                 long to_len = (long)(header & 0xFFF);
@@ -1379,7 +1428,7 @@ public static unsafe class OodleDecompressor
                 // 3 byte header, must have >= 1 payload byte
                 if (from_end - from_ptr < 4) return -1;
 
-                uint header = ReadU24BE(from_ptr);
+                uint header = H.ReadU24BE(from_ptr);
                 from_ptr += 3;
 
                 if (array_type >= NEWLZ_ARRAY_TYPE_COUNT) return -1;
@@ -1406,7 +1455,7 @@ public static unsafe class OodleDecompressor
                 // Could be a 3-byte header at end of stream
                 if (from_end - from_ptr == 3)
                 {
-                    uint header = ReadU24BE(from_ptr);
+                    uint header = H.ReadU24BE(from_ptr);
                     if (header == 0)
                     {
                         *pto_len = 0;
@@ -1419,7 +1468,7 @@ public static unsafe class OodleDecompressor
             if (array_type == NEWLZ_ARRAY_TYPE_UNCOMPRESSED)
             {
                 // 3-byte header
-                uint header = ReadU24BE(from_ptr);
+                uint header = H.ReadU24BE(from_ptr);
                 from_ptr += 3;
 
                 long to_len = (long)(header & NEWLZ_ARRAY_SIZE_MASK);
@@ -1441,7 +1490,7 @@ public static unsafe class OodleDecompressor
                 // 5-byte header
                 ulong header64 = (ulong)*from_ptr++;
                 header64 <<= 32;
-                header64 += ReadU32BE(from_ptr);
+                header64 += H.ReadU32BE(from_ptr);
                 from_ptr += 4;
 
                 long comp_len = (long)(header64 & NEWLZ_ARRAY_SIZE_MASK);
@@ -1467,7 +1516,7 @@ public static unsafe class OodleDecompressor
             if (comp_len == 1)
             {
                 byte val = comp[0];
-                FillBytes(to, val, (int)to_len);
+                H.FillBytes(to, val, (int)to_len);
                 return comp_len;
             }
             else
@@ -1511,21 +1560,21 @@ public static unsafe class OodleDecompressor
 
                 if (lrl > 0)
                 {
-                    Buffer.MemoryCopy(lits, outp, lrl, lrl);
+                    H.CopyBytes_SIMD(outp, lits, lrl);
                     lits += lrl;
                     outp += lrl;
                 }
 
                 if (rl > 0)
                 {
-                    FillBytes(outp, run_val, rl);
+                    H.FillBytes(outp, run_val, rl);
                     outp += rl;
                 }
             }
             else if (packet >= 0x10) // Medium LRL + RL
             {
                 pkts--;
-                ushort v_raw = ReadU16LE(pkts);
+                ushort v_raw = H.ReadU16LE(pkts);
                 int v = v_raw - 0x1000;
 
                 int lrl = v & 0x3f;
@@ -1533,14 +1582,14 @@ public static unsafe class OodleDecompressor
 
                 if (lrl > 0)
                 {
-                    Buffer.MemoryCopy(lits, outp, lrl, lrl);
+                    H.CopyBytes_SIMD(outp, lits, lrl);
                     lits += lrl;
                     outp += lrl;
                 }
 
                 if (rl > 0)
                 {
-                    FillBytes(outp, run_val, rl);
+                    H.FillBytes(outp, run_val, rl);
                     outp += rl;
                 }
             }
@@ -1551,23 +1600,23 @@ public static unsafe class OodleDecompressor
             else if (packet >= 0x09) // Long RL
             {
                 pkts--;
-                ushort v_raw = ReadU16LE(pkts);
+                ushort v_raw = H.ReadU16LE(pkts);
                 int v = v_raw - 0x900 + 1;
 
                 int rl = v << 7;
 
-                FillBytes(outp, run_val, rl);
+                H.FillBytes(outp, run_val, rl);
                 outp += rl;
             }
             else // Long LRL (packet >= 0x02)
             {
                 pkts--;
-                ushort v_raw = ReadU16LE(pkts);
+                ushort v_raw = H.ReadU16LE(pkts);
                 int v = v_raw - 0x200 + 1;
 
                 int lrl = v << 6;
 
-                Buffer.MemoryCopy(lits, outp, lrl, lrl);
+                H.CopyBytes_SIMD(outp, lits, lrl);
                 lits += lrl;
                 outp += lrl;
             }
@@ -1579,25 +1628,25 @@ public static unsafe class OodleDecompressor
     private static long newLZ_get_array(byte** ptr_to, byte* from, byte* from_end, long* pto_len, long to_len_max, bool force_copy_uncompressed, byte* scratch_ptr, byte* scratch_end)
     {
         byte* from_ptr = from;
-        if (from_end - from_ptr < 2) { LogOodle("newLZ_get_array: from_end - from_ptr < 2"); return -1; }
+        if (from_end - from_ptr < 2) { H.LogOodle("newLZ_get_array: from_end - from_ptr < 2"); return -1; }
 
         byte first_byte = *from_ptr;
         uint array_type = (uint)(first_byte >> 4);
-        LogOodle($"newLZ_get_array: first_byte={first_byte:X2} array_type={array_type} from_end-from_ptr={from_end - from_ptr} to_len_max={to_len_max}");
+        H.LogOodle($"newLZ_get_array: first_byte={first_byte:X2} array_type={array_type} from_end-from_ptr={from_end - from_ptr} to_len_max={to_len_max}");
 
         if (first_byte >= 0x80)
         {
             array_type &= 7;
-            LogOodle($"newLZ_get_array: short header, array_type={array_type} from_ptr[0]={from_ptr[0]:X2} from_ptr[1]={from_ptr[1]:X2}");
+            H.LogOodle($"newLZ_get_array: short header, array_type={array_type} from_ptr[0]={from_ptr[0]:X2} from_ptr[1]={from_ptr[1]:X2}");
             if (array_type == 0)
             {
-                uint header = ReadU16BE(from_ptr);
+                uint header = H.ReadU16BE(from_ptr);
                 from_ptr += 2;
 
                 long to_len = (long)(header & 0xFFF);
-                LogOodle($"newLZ_get_array: short uncompressed header={header:X4} to_len={to_len} from_end-from_ptr={from_end - from_ptr}");
-                if (to_len > to_len_max) { LogOodle($"newLZ_get_array: to_len={to_len} > to_len_max={to_len_max}"); return -1; }
-                if (from_ptr + to_len > from_end) { LogOodle($"newLZ_get_array: from_ptr + to_len > from_end"); return -1; }
+                H.LogOodle($"newLZ_get_array: short uncompressed header={header:X4} to_len={to_len} from_end-from_ptr={from_end - from_ptr}");
+                if (to_len > to_len_max) { H.LogOodle($"newLZ_get_array: to_len={to_len} > to_len_max={to_len_max}"); return -1; }
+                if (from_ptr + to_len > from_end) { H.LogOodle($"newLZ_get_array: from_ptr + to_len > from_end"); return -1; }
 
                 if (force_copy_uncompressed)
                 {
@@ -1619,7 +1668,7 @@ public static unsafe class OodleDecompressor
             {
                 if (from_end - from_ptr == 3)
                 {
-                    uint header = ReadU24BE(from_ptr);
+                    uint header = H.ReadU24BE(from_ptr);
                     if (header == 0)
                     {
                         *ptr_to = null;
@@ -1632,7 +1681,7 @@ public static unsafe class OodleDecompressor
 
             if (array_type == NEWLZ_ARRAY_TYPE_UNCOMPRESSED)
             {
-                uint header = ReadU24BE(from_ptr);
+                uint header = H.ReadU24BE(from_ptr);
                 from_ptr += 3;
 
                 long to_len = (long)(header & NEWLZ_ARRAY_SIZE_MASK);
@@ -1671,7 +1720,7 @@ public static unsafe class OodleDecompressor
         {
             if (from_end - from_ptr < 4) return -1;
 
-            uint header = ReadU24BE(from_ptr);
+            uint header = H.ReadU24BE(from_ptr);
             from_ptr += 3;
 
             comp_len = (long)(header & NEWLZ_ARRAY_SMALL_SIZE_MASK);
@@ -1680,48 +1729,48 @@ public static unsafe class OodleDecompressor
             to_len = (long)((header >> NEWLZ_ARRAY_SMALL_SIZE_BITS) & NEWLZ_ARRAY_SMALL_SIZE_MASK);
             to_len += comp_len + 1;
 
-            if (to_len > to_len_max) { LogOodle($"newLZ_get_array_comp short: to_len={to_len} > to_len_max={to_len_max}"); return -1; }
+            if (to_len > to_len_max) { H.LogOodle($"newLZ_get_array_comp short: to_len={to_len} > to_len_max={to_len_max}"); return -1; }
         }
         else
         {
-            if (from_end - from_ptr < 5) { LogOodle("newLZ_get_array_comp long: from_end - from_ptr < 5"); return -1; }
+            if (from_end - from_ptr < 5) { H.LogOodle("newLZ_get_array_comp long: from_end - from_ptr < 5"); return -1; }
 
             ulong h1 = *from_ptr++;
-            uint h2 = ReadU32BE(from_ptr);
+            uint h2 = H.ReadU32BE(from_ptr);
             from_ptr += 4;
             ulong headerVal = (h1 << 32) | h2;
 
-            LogOodle($"newLZ_get_array_comp long: h1={h1:X2} h2={h2:X8} headerVal={headerVal:X} headerVal>>36={headerVal >> 36} array_type={array_type}");
+            H.LogOodle($"newLZ_get_array_comp long: h1={h1:X2} h2={h2:X8} headerVal={headerVal:X} headerVal>>36={headerVal >> 36} array_type={array_type}");
 
             if ((headerVal >> 36) != array_type)
             {
-                LogOodle($"newLZ_get_array_comp long: type mismatch {headerVal >> 36} != {array_type}");
+                H.LogOodle($"newLZ_get_array_comp long: type mismatch {headerVal >> 36} != {array_type}");
                 return -1;
             }
 
             comp_len = (long)(headerVal & NEWLZ_ARRAY_SIZE_MASK);
             if (comp_len > (from_end - from_ptr))
             {
-                LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} > from_end-from_ptr={from_end - from_ptr}");
+                H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} > from_end-from_ptr={from_end - from_ptr}");
                 return -1;
             }
 
             to_len = (long)((headerVal >> NEWLZ_ARRAY_SIZE_BITS) & NEWLZ_ARRAY_SIZE_MASK);
             to_len++;
 
-            LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} to_len={to_len} to_len_max={to_len_max}");
+            H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} to_len={to_len} to_len_max={to_len_max}");
 
             if (to_len > to_len_max)
             {
-                LogOodle($"newLZ_get_array_comp long: to_len={to_len} > to_len_max={to_len_max}");
+                H.LogOodle($"newLZ_get_array_comp long: to_len={to_len} > to_len_max={to_len_max}");
                 return -1;
             }
-            if (comp_len >= to_len) { LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} >= to_len={to_len}"); return -1; }
+            if (comp_len >= to_len) { H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} >= to_len={to_len}"); return -1; }
         }
 
         if (*ptr_to == scratch_ptr)
         {
-            if ((scratch_end - scratch_ptr) < to_len) { LogOodle($"newLZ_get_array_comp: scratch space too small"); return -1; }
+            if ((scratch_end - scratch_ptr) < to_len) { H.LogOodle($"newLZ_get_array_comp: scratch space too small"); return -1; }
             scratch_ptr += to_len;
         }
 
@@ -1729,40 +1778,40 @@ public static unsafe class OodleDecompressor
 
         if (array_type == NEWLZ_ARRAY_TYPE_SPLIT)
         {
-            LogOodle($"newLZ_get_array_comp: calling SPLIT, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} to_ptr={(long)*ptr_to:X}");
+            H.LogOodle($"newLZ_get_array_comp: calling SPLIT, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} to_ptr={(long)*ptr_to:X}");
             comp_used = newLZ_get_array_split(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_array_comp: SPLIT returned comp_used={comp_used}");
+            H.LogOodle($"newLZ_get_array_comp: SPLIT returned comp_used={comp_used}");
             if (to_len == 10498 && comp_used > 0)
             {
                 byte* result = *ptr_to;
-                LogOodle($"SPLIT result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
+                H.LogOodle($"SPLIT result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
             }
         }
         else if (array_type == NEWLZ_ARRAY_TYPE_RLE)
         {
-            LogOodle($"newLZ_get_array_comp: calling RLE, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
+            H.LogOodle($"newLZ_get_array_comp: calling RLE, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
             comp_used = newLZ_get_array_rle(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_array_comp: RLE returned comp_used={comp_used}");
+            H.LogOodle($"newLZ_get_array_comp: RLE returned comp_used={comp_used}");
         }
         else if (array_type == NEWLZ_ARRAY_TYPE_TANS)
         {
-            LogOodle($"newLZ_get_array_comp: calling TANS, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
+            H.LogOodle($"newLZ_get_array_comp: calling TANS, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
             comp_used = newlz_get_array_tans(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_array_comp: TANS returned comp_used={comp_used}");
+            H.LogOodle($"newLZ_get_array_comp: TANS returned comp_used={comp_used}");
         }
         else
         {
-            LogOodle($"newLZ_get_array_comp: calling huff, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} is_huff6={array_type == NEWLZ_ARRAY_TYPE_HUFF6} to_ptr={(long)*ptr_to:X}");
+            H.LogOodle($"newLZ_get_array_comp: calling huff, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} is_huff6={array_type == NEWLZ_ARRAY_TYPE_HUFF6} to_ptr={(long)*ptr_to:X}");
             comp_used = newlz_get_array_huff(from_ptr, comp_len, *ptr_to, to_len, array_type == NEWLZ_ARRAY_TYPE_HUFF6);
-            LogOodle($"newLZ_get_array_comp: huff returned comp_used={comp_used}");
+            H.LogOodle($"newLZ_get_array_comp: huff returned comp_used={comp_used}");
             if (to_len == 10498 && comp_used > 0)
             {
                 byte* result = *ptr_to;
-                LogOodle($"HUFF result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
+                H.LogOodle($"HUFF result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
             }
         }
 
-        if (comp_len != comp_used) { LogOodle($"newLZ_get_array_comp: comp_len={comp_len} != comp_used={comp_used}"); return -1; }
+        if (comp_len != comp_used) { H.LogOodle($"newLZ_get_array_comp: comp_len={comp_len} != comp_used={comp_used}"); return -1; }
 
         *pto_len = to_len;
         return (from_ptr - from) + comp_len;
@@ -1792,11 +1841,11 @@ public static unsafe class OodleDecompressor
                 if (bitp0 > bitp1) break;
 
                 // Read 64 bits big-endian for forward stream
-                ulong bits0 = ReadU64BE(bitp0);
+                ulong bits0 = H.ReadU64BE(bitp0);
                 // Read 64 bits little-endian for backward stream
-                ulong bits1 = ReadU64LE(bitp1);
+                ulong bits1 = H.ReadU64LE(bitp1);
 
-                ulong next_offsets = ReadU64LE(offs_u8);
+                ulong next_offsets = H.ReadU64LE(offs_u8);
                 ulong next_offsets_hi = next_offsets & 0x8080808080808080;
                 ulong splat8 = 0x0101010101010101;
                 ulong has_large = (0xef * splat8 - next_offsets) & next_offsets_hi;
@@ -1984,13 +2033,13 @@ public static unsafe class OodleDecompressor
 
     private static int newLZ_offsetalt_decode64_tab(ref KrakenOffsetState s, uint offset_alt_modulo)
     {
-        LogOodle("newLZ_offsetalt_decode64_tab called");
+        H.LogOodle("newLZ_offsetalt_decode64_tab called");
         long offs_count = s.offs_u8_end - s.offs_u8;
-        LogOodle($"  offs_u8_count={offs_count} bitp0={(long)(byte*)s.bitp[0]:X} bitp1={(long)(byte*)s.bitp[1]:X} bitc0={s.bitc[0]} bitc1={s.bitc[1]}");
+        H.LogOodle($"  offs_u8_count={offs_count} bitp0={(long)(byte*)s.bitp[0]:X} bitp1={(long)(byte*)s.bitp[1]:X} bitc0={s.bitc[0]} bitc1={s.bitc[1]}");
         if (offs_count == 10498)
         {
             // Dump bytes around 378 and 391
-            LogOodle($"  offs_u8[385..395]={s.offs_u8[385]:X2} {s.offs_u8[386]:X2} {s.offs_u8[387]:X2} {s.offs_u8[388]:X2} {s.offs_u8[389]:X2} {s.offs_u8[390]:X2} {s.offs_u8[391]:X2} {s.offs_u8[392]:X2} {s.offs_u8[393]:X2} {s.offs_u8[394]:X2} {s.offs_u8[395]:X2}");
+            H.LogOodle($"  offs_u8[385..395]={s.offs_u8[385]:X2} {s.offs_u8[386]:X2} {s.offs_u8[387]:X2} {s.offs_u8[388]:X2} {s.offs_u8[389]:X2} {s.offs_u8[390]:X2} {s.offs_u8[391]:X2} {s.offs_u8[392]:X2} {s.offs_u8[393]:X2} {s.offs_u8[394]:X2} {s.offs_u8[395]:X2}");
         }
 
         // TEST: Skip fast path entirely to use finish path only
@@ -2021,14 +2070,14 @@ public static unsafe class OodleDecompressor
                     break;
 
                 // Bit buffer refill
-                ulong bits0 = ReadU64BE(bitp0);
-                ulong bits1 = ReadU64LE(bitp1);
+                ulong bits0 = H.ReadU64BE(bitp0);
+                ulong bits1 = H.ReadU64LE(bitp1);
 
                 // Check whether the next 6 offsets have <=18 extra bits
                 const ulong splat8 = 0x0101010101010101UL; // ~0ull / 255
                 const byte first_large_code = 19 << OFFSET_ALT_NUM_UNDER_BITS;
 
-                ulong next_offsets = ReadU64LE(offs_u8);
+                ulong next_offsets = H.ReadU64LE(offs_u8);
                 ulong next_offsets_hi = next_offsets & 0x808080808080UL; // MSB of the first 6 bytes
 
                 ulong has_large_codes = ((first_large_code - 1) * splat8 - next_offsets) & next_offsets_hi;
@@ -2040,7 +2089,7 @@ public static unsafe class OodleDecompressor
                 {
                     long neg_offs_idx = neg_offs_s32 - s.neg_offs_s32;
                     bool log_chunk1_833 = (current_idx >= 828 && current_idx <= 840 && offs_count > 15000);
-                    if (log_detail || log_chunk1_833) LogOodle($"decode offset batch [{current_idx}..{current_idx+5}]: next_offsets={next_offsets:X16} bitp0={(long)bitp0:X} bitp1={(long)bitp1:X} bitc0={bitc0} bitc1={bitc1} neg_offs_idx={neg_offs_idx}");
+                    if (log_detail || log_chunk1_833) H.LogOodle($"decode offset batch [{current_idx}..{current_idx+5}]: next_offsets={next_offsets:X16} bitp0={(long)bitp0:X} bitp1={(long)bitp1:X} bitc0={bitc0} bitc1={bitc1} neg_offs_idx={neg_offs_idx}");
                     // All short (<=18 bits), can do 3 decodes without refill.
 
                     // 0
@@ -2049,7 +2098,7 @@ public static unsafe class OodleDecompressor
                     bitc0 += num_raw;
                     uint offs_raw_bits = (uint)((bits0 >> (int)(64 - bitc0)) & ((1UL << (int)num_raw) - 1));
                     int neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
                     neg_offs_s32[0] = neg_offs;
 
                     // 1
@@ -2059,7 +2108,7 @@ public static unsafe class OodleDecompressor
                     bitc1 += num_raw;
                     offs_raw_bits = (uint)((bits1 >> (int)(64 - bitc1)) & ((1UL << (int)num_raw) - 1));
                     neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx+1}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx+1}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} neg_offs={neg_offs}");
                     neg_offs_s32[1] = neg_offs;
 
                     // 2
@@ -2068,7 +2117,7 @@ public static unsafe class OodleDecompressor
                     bitc0 += num_raw;
                     offs_raw_bits = (uint)((bits0 >> (int)(64 - bitc0)) & ((1UL << (int)num_raw) - 1));
                     neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx+2}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx+2}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
                     neg_offs_s32[2] = neg_offs;
 
                     // 3
@@ -2077,7 +2126,7 @@ public static unsafe class OodleDecompressor
                     bitc1 += num_raw;
                     offs_raw_bits = (uint)((bits1 >> (int)(64 - bitc1)) & ((1UL << (int)num_raw) - 1));
                     neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx+3}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1={bitc1} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx+3}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1={bitc1} neg_offs={neg_offs}");
                     neg_offs_s32[3] = neg_offs;
 
                     // 4
@@ -2086,7 +2135,7 @@ public static unsafe class OodleDecompressor
                     bitc0 += num_raw;
                     offs_raw_bits = (uint)((bits0 >> (int)(64 - bitc0)) & ((1UL << (int)num_raw) - 1));
                     neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx+4}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx+4}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits0={bits0:X16} bitc0={bitc0} neg_offs={neg_offs}");
                     neg_offs_s32[4] = neg_offs;
 
                     // 5
@@ -2095,7 +2144,7 @@ public static unsafe class OodleDecompressor
                     bitc1 += num_raw;
                     offs_raw_bits = (uint)((bits1 >> (int)(64 - bitc1)) & ((1UL << (int)num_raw) - 1));
                     neg_offs = newlz_offsetsalt_bias_tab[packed] - (int)offs_raw_bits;
-                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) LogOodle($"  offset[{current_idx+5}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1={bitc1} neg_offs={neg_offs}");
+                    if (neg_offs < -3000000 || log_detail || log_chunk1_833) H.LogOodle($"  offset[{current_idx+5}]: packed=0x{packed:X2} num_raw={num_raw} offs_raw_bits={offs_raw_bits} bits1={bits1:X16} bitc1={bitc1} neg_offs={neg_offs}");
                     neg_offs_s32[5] = neg_offs;
 
                     offs_u8 += 6;
@@ -2108,7 +2157,7 @@ public static unsafe class OodleDecompressor
                     ulong has_bad_codes = ((first_illegal_code - 1) * splat8 - next_offsets) & next_offsets_hi;
                     if (has_bad_codes != 0)
                     {
-                        LogOodle($"newLZ_offsetalt_decode64_tab: has_bad_codes={has_bad_codes:X} next_offsets={next_offsets:X}");
+                        H.LogOodle($"newLZ_offsetalt_decode64_tab: has_bad_codes={has_bad_codes:X} next_offsets={next_offsets:X}");
                         return 0;
                     }
 
@@ -2208,16 +2257,16 @@ public static unsafe class OodleDecompressor
         uint bitc0 = s.bitc[0];
         uint bitc1 = s.bitc[1];
 
-        LogOodle($"newLZ_offsetalt_decode_finish: offs_u8={(long)offs_u8:X} offs_u8_end={(long)offs_u8_end:X} diff={offs_u8_end - offs_u8}");
+        H.LogOodle($"newLZ_offsetalt_decode_finish: offs_u8={(long)offs_u8:X} offs_u8_end={(long)offs_u8_end:X} diff={offs_u8_end - offs_u8}");
 
         // Dump first 10 offs_u8 values for the 10498 case
         if (total_count == 10498) {
-            LogOodle($"  offs_u8[0..9]={offs_u8[0]:X2} {offs_u8[1]:X2} {offs_u8[2]:X2} {offs_u8[3]:X2} {offs_u8[4]:X2} {offs_u8[5]:X2} {offs_u8[6]:X2} {offs_u8[7]:X2} {offs_u8[8]:X2} {offs_u8[9]:X2}");
+            H.LogOodle($"  offs_u8[0..9]={offs_u8[0]:X2} {offs_u8[1]:X2} {offs_u8[2]:X2} {offs_u8[3]:X2} {offs_u8[4]:X2} {offs_u8[5]:X2} {offs_u8[6]:X2} {offs_u8[7]:X2} {offs_u8[8]:X2} {offs_u8[9]:X2}");
         }
 
         if (bitp0 > bitp1)
         {
-            LogOodle($"newLZ_offsetalt_decode_finish: bitp0 > bitp1 ({((long)bitp0):X} > {((long)bitp1):X})");
+            H.LogOodle($"newLZ_offsetalt_decode_finish: bitp0 > bitp1 ({((long)bitp0):X} > {((long)bitp1):X})");
             return 0;
         }
 
@@ -2233,7 +2282,7 @@ public static unsafe class OodleDecompressor
                 // Let's try to read carefully.
                 if (bytes_left < 0)
                 {
-                    LogOodle($"newLZ_offsetalt_decode_finish: bytes_left < 0 ({bytes_left})");
+                    H.LogOodle($"newLZ_offsetalt_decode_finish: bytes_left < 0 ({bytes_left})");
                     return 0;
                 }
             }
@@ -2258,7 +2307,7 @@ public static unsafe class OodleDecompressor
             int num_raw = packed >> OFFSET_ALT_NUM_UNDER_BITS;
             if (num_raw > 26)
             {
-                LogOodle($"newLZ_offsetalt_decode_finish: num_raw > 26 ({num_raw})");
+                H.LogOodle($"newLZ_offsetalt_decode_finish: num_raw > 26 ({num_raw})");
                 return 0;
             }
 
@@ -2269,7 +2318,7 @@ public static unsafe class OodleDecompressor
             // Log even offsets (from bits0) for the chunk with 10498 offsets
             long offs_idx0 = neg_offs_s32 - s.neg_offs_s32;
             if (total_count == 15805 && (offs_idx0 >= 830 && offs_idx0 <= 836)) {
-                LogOodle($"FINISH15805 offset[{offs_idx0}]: packed=0x{packed:X2} num_raw={num_raw} bits0={bits0:X16} bitc0={bitc0} offs_lo={offs_lo_bits} neg_offs={neg_offs0}");
+                H.LogOodle($"FINISH15805 offset[{offs_idx0}]: packed=0x{packed:X2} num_raw={num_raw} bits0={bits0:X16} bitc0={bitc0} offs_lo={offs_lo_bits} neg_offs={neg_offs0}");
             }
             *neg_offs_s32++ = neg_offs0;
 
@@ -2280,7 +2329,7 @@ public static unsafe class OodleDecompressor
                 num_raw = packed >> OFFSET_ALT_NUM_UNDER_BITS;
                 if (num_raw > 26)
                 {
-                    LogOodle($"newLZ_offsetalt_decode_finish: num_raw (2) > 26 ({num_raw})");
+                    H.LogOodle($"newLZ_offsetalt_decode_finish: num_raw (2) > 26 ({num_raw})");
                     return 0;
                 }
 
@@ -2292,11 +2341,11 @@ public static unsafe class OodleDecompressor
                 int neg_offs = newlz_offsetsalt_bias_tab[packed] - offs_lo_bits;
                 // Log offsets 831-835 for the chunk with 15805 offsets
                 if (total_count == 15805 && (offs_idx >= 831 && offs_idx <= 837)) {
-                    LogOodle($"FINISH15805 offset[{offs_idx}]: packed=0x{packed:X2} num_raw={num_raw} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} offs_lo={offs_lo_bits} neg_offs={neg_offs}");
+                    H.LogOodle($"FINISH15805 offset[{offs_idx}]: packed=0x{packed:X2} num_raw={num_raw} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} offs_lo={offs_lo_bits} neg_offs={neg_offs}");
                 }
                 if (neg_offs < -3000000) {
                     byte* raw = bitp1 - 8;
-                    LogOodle($"FINISH offset[{offs_idx}]: packed=0x{packed:X2} num_raw={num_raw} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} offs_lo={offs_lo_bits} neg_offs={neg_offs} bitp1={(long)bitp1:X} raw_bytes={raw[0]:X2}{raw[1]:X2}{raw[2]:X2}{raw[3]:X2}{raw[4]:X2}{raw[5]:X2}{raw[6]:X2}{raw[7]:X2}");
+                    H.LogOodle($"FINISH offset[{offs_idx}]: packed=0x{packed:X2} num_raw={num_raw} bits1={bits1:X16} bitc1_before={bitc1_before} bitc1={bitc1} offs_lo={offs_lo_bits} neg_offs={neg_offs} bitp1={(long)bitp1:X} raw_bytes={raw[0]:X2}{raw[1]:X2}{raw[2]:X2}{raw[3]:X2}{raw[4]:X2}{raw[5]:X2}{raw[6]:X2}{raw[7]:X2}");
                 }
                 *neg_offs_s32++ = neg_offs;
             }
@@ -2355,7 +2404,7 @@ public static unsafe class OodleDecompressor
             return false;
         }
 
-        int cntLZ = System.Numerics.BitOperations.LeadingZeroCount(vb.m_bits);
+        int cntLZ = BitOperations.LeadingZeroCount(vb.m_bits);
         int nBits = 2 * cntLZ + 1 + rshift;
 
         if ((63 - vb.m_inv_bitlen) < nBits)
@@ -2380,7 +2429,7 @@ public static unsafe class OodleDecompressor
         {
             if (excesses_ptr > excesses_end)
             {
-                LogOodle("newLZ_get_excesses: excesses_ptr > excesses_end");
+                H.LogOodle("newLZ_get_excesses: excesses_ptr > excesses_end");
                 return -1;
             }
 
@@ -2390,12 +2439,12 @@ public static unsafe class OodleDecompressor
             uint excess1, excess2;
             if (!VARBITS_GET_EXPGOLOMB(ref vb1, EXCESS_EXPGOLOMB_SHIFT, out excess1))
             {
-                LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 1 failed");
+                H.LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 1 failed");
                 return -1;
             }
             if (!VARBITS_GET_EXPGOLOMB(ref vb2, EXCESS_EXPGOLOMB_SHIFT, out excess2))
             {
-                LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 2 failed");
+                H.LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 2 failed");
                 return -1;
             }
 
@@ -2407,12 +2456,12 @@ public static unsafe class OodleDecompressor
 
             if (!VARBITS_GET_EXPGOLOMB(ref vb1, EXCESS_EXPGOLOMB_SHIFT, out excess1))
             {
-                LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 3 failed");
+                H.LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 3 failed");
                 return -1;
             }
             if (!VARBITS_GET_EXPGOLOMB(ref vb2, EXCESS_EXPGOLOMB_SHIFT, out excess2))
             {
-                LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 4 failed");
+                H.LogOodle("newLZ_get_excesses: VARBITS_GET_EXPGOLOMB 4 failed");
                 return -1;
             }
 
@@ -2425,7 +2474,6 @@ public static unsafe class OodleDecompressor
         if (rem_bytes < 0) rem_bytes = 0;
 
         byte* tail_buf = stackalloc byte[128];
-        new Span<byte>(tail_buf, 128).Clear();
 
         byte* newf = tail_buf + 24; // 16 + 8
 
@@ -2482,15 +2530,15 @@ public static unsafe class OodleDecompressor
 
     private static int newLZ_get_offsets_excesses(byte* comp_ptr, byte* chunk_comp_end, byte* offsets_u8, byte* offsets_u8_2, long offsets_count, uint offset_alt_modulo, byte* excesses_u8, long excesses_count, int* offsets, uint* excesses, long end_of_chunk_pos, byte excess_hdr_byte, int excess_stream_bytes)
     {
-        // LogOodle($"newLZ_get_offsets_excesses: comp_ptr={(long)comp_ptr:X} chunk_comp_end={(long)chunk_comp_end:X} diff={chunk_comp_end - comp_ptr} offsets_count={offsets_count} excesses_count={excesses_count}");
+        // H.LogOodle($"newLZ_get_offsets_excesses: comp_ptr={(long)comp_ptr:X} chunk_comp_end={(long)chunk_comp_end:X} diff={chunk_comp_end - comp_ptr} offsets_count={offsets_count} excesses_count={excesses_count}");
         if (comp_ptr >= chunk_comp_end && excess_hdr_byte == 0)
         {
-             LogOodle($"newLZ_get_offsets_excesses: comp_ptr >= chunk_comp_end ({chunk_comp_end - comp_ptr}) and excess_hdr_byte == 0");
+             H.LogOodle($"newLZ_get_offsets_excesses: comp_ptr >= chunk_comp_end ({chunk_comp_end - comp_ptr}) and excess_hdr_byte == 0");
              return -1;
         }
         if (excess_stream_bytes > (chunk_comp_end - comp_ptr))
         {
-             LogOodle($"newLZ_get_offsets_excesses: excess_stream_bytes ({excess_stream_bytes}) > diff ({chunk_comp_end - comp_ptr})");
+             H.LogOodle($"newLZ_get_offsets_excesses: excess_stream_bytes ({excess_stream_bytes}) > diff ({chunk_comp_end - comp_ptr})");
              return -1;
         }
 
@@ -2519,7 +2567,7 @@ public static unsafe class OodleDecompressor
             uint val;
             if (!VARBITS_GET_EXPGOLOMB(ref lvb2, 0, out val))
             {
-                LogOodle("newLZ_get_offsets_excesses: VARBITS_GET_EXPGOLOMB failed for excess_u32_count");
+                H.LogOodle("newLZ_get_offsets_excesses: VARBITS_GET_EXPGOLOMB failed for excess_u32_count");
                 return -1;
             }
             excess_u32_count = val;
@@ -2537,7 +2585,7 @@ public static unsafe class OodleDecompressor
             // Debug: print u8 values around 833 if enough offsets
             if (offsets_count >= 835)
             {
-                LogOodle($"Before offset decode, offs_u8[832..834]=0x{offsets_u8[832]:X2} 0x{offsets_u8[833]:X2} 0x{offsets_u8[834]:X2}");
+                H.LogOodle($"Before offset decode, offs_u8[832..834]=0x{offsets_u8[832]:X2} 0x{offsets_u8[833]:X2} 0x{offsets_u8[834]:X2}");
             }
 
             long len1 = 63 - lvb1.m_inv_bitlen;
@@ -2548,12 +2596,12 @@ public static unsafe class OodleDecompressor
             s.bitc[1] = (uint)((0 - len2) & 7);
 
             if (offsets_count == 10498) {
-                LogOodle($"Offset init (10498): len1={len1} len2={len2} lvb1.m_cur={((long)lvb1.m_cur):X} lvb2.m_cur={((long)lvb2.m_cur):X} bitp0={s.bitp[0]:X} bitp1={s.bitp[1]:X} bitc0={s.bitc[0]} bitc1={s.bitc[1]}");
+                H.LogOodle($"Offset init (10498): len1={len1} len2={len2} lvb1.m_cur={((long)lvb1.m_cur):X} lvb2.m_cur={((long)lvb2.m_cur):X} bitp0={s.bitp[0]:X} bitp1={s.bitp[1]:X} bitc0={s.bitc[0]} bitc1={s.bitc[1]}");
                 // Dump first bytes of bitstream
                 byte* bp0 = (byte*)s.bitp[0];
                 byte* bp1 = (byte*)s.bitp[1];
-                LogOodle($"  bitp0 bytes: {bp0[0]:X2} {bp0[1]:X2} {bp0[2]:X2} {bp0[3]:X2} {bp0[4]:X2} {bp0[5]:X2} {bp0[6]:X2} {bp0[7]:X2}");
-                LogOodle($"  bitp1-8 bytes: {(bp1-8)[0]:X2} {(bp1-8)[1]:X2} {(bp1-8)[2]:X2} {(bp1-8)[3]:X2} {(bp1-8)[4]:X2} {(bp1-8)[5]:X2} {(bp1-8)[6]:X2} {(bp1-8)[7]:X2}");
+                H.LogOodle($"  bitp0 bytes: {bp0[0]:X2} {bp0[1]:X2} {bp0[2]:X2} {bp0[3]:X2} {bp0[4]:X2} {bp0[5]:X2} {bp0[6]:X2} {bp0[7]:X2}");
+                H.LogOodle($"  bitp1-8 bytes: {(bp1-8)[0]:X2} {(bp1-8)[1]:X2} {(bp1-8)[2]:X2} {(bp1-8)[3]:X2} {(bp1-8)[4]:X2} {(bp1-8)[5]:X2} {(bp1-8)[6]:X2} {(bp1-8)[7]:X2}");
             }
 
             int decode_ok = 0;
@@ -2579,13 +2627,13 @@ public static unsafe class OodleDecompressor
             // Verify offsets after decoding - log offset around index 126
             if (offsets_count > 126)
             {
-                LogOodle($"After offset decode, offsets[125..128]={offsets[125]},{offsets[126]},{offsets[127]},{(offsets_count > 128 ? offsets[128].ToString() : "N/A")} count={offsets_count}");
-                LogOodle($"After offset decode, offs_u8[125..128]=0x{offsets_u8[125]:X2},0x{offsets_u8[126]:X2},0x{offsets_u8[127]:X2}");
+                H.LogOodle($"After offset decode, offsets[125..128]={offsets[125]},{offsets[126]},{offsets[127]},{(offsets_count > 128 ? offsets[128].ToString() : "N/A")} count={offsets_count}");
+                H.LogOodle($"After offset decode, offs_u8[125..128]=0x{offsets_u8[125]:X2},0x{offsets_u8[126]:X2},0x{offsets_u8[127]:X2}");
             }
 
             if (decode_ok == 0)
             {
-                LogOodle("newLZ_get_offsets_excesses: newLZ_offset44_decode64_tab failed");
+                H.LogOodle("newLZ_get_offsets_excesses: newLZ_offset44_decode64_tab failed");
                 return -1;
             }
 
@@ -2629,14 +2677,14 @@ public static unsafe class OodleDecompressor
 
         if (excess_u32_count > 0 || excess_stream_bytes > 0)
         {
-            LogOodle($"newLZ_get_offsets_excesses: excess_u32_count={excess_u32_count} excess_stream_bytes={excess_stream_bytes}");
+            H.LogOodle($"newLZ_get_offsets_excesses: excess_u32_count={excess_u32_count} excess_stream_bytes={excess_stream_bytes}");
             uint* excesses_u32_arr = stackalloc uint[512 + 8];
             uint* excesses_u32_base = excesses_u32_arr;
 
             long decoded_count = newLZ_get_excesses(ref lvb1, ref lvb2, excesses_u32_base, excesses_u32_base + 512, excess_u32_count, ptr_start, ptr_end);
             if (decoded_count < 0)
             {
-                LogOodle("newLZ_get_offsets_excesses: newLZ_get_excesses failed");
+                H.LogOodle("newLZ_get_offsets_excesses: newLZ_get_excesses failed");
                 return -1;
             }
 
@@ -2917,7 +2965,7 @@ public static unsafe class OodleDecompressor
                  int memsetVal = (int)qh.crc; // Simplified
                  // TODO: Handle legacy memset val if needed
 
-                 FillBytes(decPtr, (byte)memsetVal, (int)qh_rawLen);
+                 H.FillBytes(decPtr, (byte)memsetVal, (int)qh_rawLen);
 
                  decPtr += qh_rawLen;
                  decoder.decPos += qh_rawLen;
@@ -3024,7 +3072,7 @@ public static unsafe class OodleDecompressor
 
     private static int Mermaid_DecodeOneQuantum(byte* decomp, byte* decomp_end, byte* comp, int quantumCompLen, byte* compBufEnd, long pos_since_reset, byte* scratch, int scratch_size)
     {
-        LogOodle($"DecodeOneQuantum: decomp_len={decomp_end - decomp} comp_len={quantumCompLen}");
+        H.LogOodle($"DecodeOneQuantum: decomp_len={decomp_end - decomp} comp_len={quantumCompLen}");
         long decomp_len = decomp_end - decomp;
         byte* scratch_ptr = scratch;
         byte* scratch_end = scratch + scratch_size;
@@ -3041,9 +3089,9 @@ public static unsafe class OodleDecompressor
 
             if (compEnd - compPtr < 4) return -1;
 
-            int chunk_comp_len = (int)ReadU24BE(compPtr);
+            int chunk_comp_len = (int)H.ReadU24BE(compPtr);
 
-            LogOodle($"Chunk header bytes: {compPtr[0]:X2} {compPtr[1]:X2} {compPtr[2]:X2} raw_header={chunk_comp_len:X6}");
+            H.LogOodle($"Chunk header bytes: {compPtr[0]:X2} {compPtr[1]:X2} {compPtr[2]:X2} raw_header={chunk_comp_len:X6}");
 
             if (chunk_comp_len >= (1 << 23))
             {
@@ -3051,7 +3099,7 @@ public static unsafe class OodleDecompressor
                 chunk_comp_len &= (1 << 19) - 1;
                 compPtr += 3;
 
-                LogOodle($"Chunk: type={chunk_type} len={chunk_len} comp_len={chunk_comp_len} pos={chunk_pos}");
+                H.LogOodle($"Chunk: type={chunk_type} len={chunk_len} comp_len={chunk_comp_len} pos={chunk_pos}");
 
                 if (chunk_comp_len > compEnd - compPtr) return -1;
 
@@ -3076,14 +3124,20 @@ public static unsafe class OodleDecompressor
 
                     if (newLZF_decode_chunk_phase1(chunk_type, compPtr, chunk_comp_end, rawPtr, chunk_len, chunk_pos, scratch_ptr, scratch_end, ref arrays) < 0)
                     {
-                        LogOodle("newLZF_decode_chunk_phase1 failed");
+                        H.LogOodle("newLZF_decode_chunk_phase1 failed");
                         return -1;
                     }
 
                     if (newLZF_decode_chunk_phase2(chunk_type, compPtr, chunk_comp_end, rawPtr, chunk_len, chunk_pos, decomp_end, ref arrays) < 0)
                     {
-                        LogOodle("newLZF_decode_chunk_phase2 failed");
+                        H.LogOodle("newLZF_decode_chunk_phase2 failed");
                         return -1;
+                    }
+
+                    // Debug: check what's at byte 936 after decoding this chunk
+                    if (chunk_pos == 0 && chunk_len > 940)
+                    {
+                        H.LogOodle($"DEBUG: After first chunk, bytes at 936: {rawPtr[936]:X2} {rawPtr[937]:X2} {rawPtr[938]:X2} {rawPtr[939]:X2} {rawPtr[940]:X2} {rawPtr[941]:X2} {rawPtr[942]:X2} {rawPtr[943]:X2}");
                     }
                 }
 
@@ -3092,8 +3146,8 @@ public static unsafe class OodleDecompressor
             }
             else
             {
-                LogOodle($"Chunk: HUFF (not compressed with packet format) len={chunk_len}");
-                LogOodle($"Chunk header bytes: {compPtr[0]:X2} {compPtr[1]:X2} {compPtr[2]:X2} {compPtr[3]:X2}");
+                H.LogOodle($"Chunk: HUFF (not compressed with packet format) len={chunk_len}");
+                H.LogOodle($"Chunk header bytes: {compPtr[0]:X2} {compPtr[1]:X2} {compPtr[2]:X2} {compPtr[3]:X2}");
                 long literals_len = 0;
 
                 bool inplace_comp_raw_overlap = (compPtr <= (rawPtr + chunk_len) && rawPtr <= compEnd);
@@ -3103,10 +3157,10 @@ public static unsafe class OodleDecompressor
                     // decode into scratch and then copy
                     byte* literals = scratch_ptr;
                     long literals_comp_len = newLZ_get_array(&literals, compPtr, compEnd, &literals_len, chunk_len, false, scratch_ptr, scratch_end);
-                    LogOodle($"newLZ_get_array returned: comp_len={literals_comp_len} literals_len={literals_len}");
+                    H.LogOodle($"newLZ_get_array returned: comp_len={literals_comp_len} literals_len={literals_len}");
                     if (literals_comp_len < 0 || literals_len != chunk_len)
                     {
-                        LogOodle($"FAILED: literals_comp_len={literals_comp_len} literals_len={literals_len} chunk_len={chunk_len}");
+                        H.LogOodle($"FAILED: literals_comp_len={literals_comp_len} literals_len={literals_len} chunk_len={chunk_len}");
                         return -1;
                     }
                     if (literals != scratch_ptr) // got uncompressed data when expecting compressed
@@ -3118,10 +3172,10 @@ public static unsafe class OodleDecompressor
                 {
                     byte* literals = rawPtr;
                     long literals_comp_len = newLZ_get_array(&literals, compPtr, compEnd, &literals_len, chunk_len, false, scratch_ptr, scratch_end);
-                    LogOodle($"newLZ_get_array returned: comp_len={literals_comp_len} literals_len={literals_len}");
+                    H.LogOodle($"newLZ_get_array returned: comp_len={literals_comp_len} literals_len={literals_len}");
                     if (literals_comp_len < 0 || literals_len != chunk_len)
                     {
-                        LogOodle($"FAILED: literals_comp_len={literals_comp_len} literals_len={literals_len} chunk_len={chunk_len}");
+                        H.LogOodle($"FAILED: literals_comp_len={literals_comp_len} literals_len={literals_len} chunk_len={chunk_len}");
                         return -1;
                     }
                     if (literals != rawPtr) // got uncompressed data when expecting compressed
@@ -3155,7 +3209,7 @@ public static unsafe class OodleDecompressor
 
         byte* scratch_ptr = scratch_space;
 
-        LogOodle($"Phase1: comp_ptr offset from comp_base = {comp_ptr - comp}");
+        H.LogOodle($"Phase1: comp_ptr offset from comp_base = {comp_ptr - comp}");
 
         byte* literals = scratch_ptr;
         long literals_count;
@@ -3164,7 +3218,7 @@ public static unsafe class OodleDecompressor
         comp_ptr += literals_comp_len;
         scratch_ptr += literals_count;
 
-        LogOodle($"Phase1: literals_count={literals_count} literals_comp_len={literals_comp_len} first8={literals[0]:X2} {literals[1]:X2} {literals[2]:X2} {literals[3]:X2} {literals[4]:X2} {literals[5]:X2} {literals[6]:X2} {literals[7]:X2}");
+        H.LogOodle($"Phase1: literals_count={literals_count} literals_comp_len={literals_comp_len} first8={literals[0]:X2} {literals[1]:X2} {literals[2]:X2} {literals[3]:X2} {literals[4]:X2} {literals[5]:X2} {literals[6]:X2} {literals[7]:X2}");
 
         arrays.literals_ptr = literals;
         arrays.literals_end = literals + literals_count;
@@ -3172,8 +3226,8 @@ public static unsafe class OodleDecompressor
         byte* packets_base = scratch_ptr;
         long packets_count;
         long packets_comp_len = newLZ_get_array(&packets_base, comp_ptr, comp_end, &packets_count, Math.Min(chunk_len, scratch_end - scratch_ptr), inplace_comp_raw_overlap, scratch_ptr, scratch_end);
-        LogOodle($"Phase1: packets_comp_len={packets_comp_len} packets_count={packets_count}");
-        if (packets_comp_len < 0) { LogOodle("Phase1: packets array failed"); return -1; }
+        H.LogOodle($"Phase1: packets_comp_len={packets_comp_len} packets_count={packets_count}");
+        if (packets_comp_len < 0) { H.LogOodle("Phase1: packets array failed"); return -1; }
         comp_ptr += packets_comp_len;
         scratch_ptr += packets_count;
 
@@ -3182,22 +3236,22 @@ public static unsafe class OodleDecompressor
 
         if (chunk_len > (1 << 16))
         {
-            if (comp_ptr + 2 > comp_end) { LogOodle("Phase1: packets_count1 read failed"); return -1; }
-            arrays.packets_count1 = ReadU16LE(comp_ptr);
+            if (comp_ptr + 2 > comp_end) { H.LogOodle("Phase1: packets_count1 read failed"); return -1; }
+            arrays.packets_count1 = H.ReadU16LE(comp_ptr);
             comp_ptr += 2;
-            LogOodle($"Phase1: packets_count1={arrays.packets_count1} (large chunk)");
+            H.LogOodle($"Phase1: packets_count1={arrays.packets_count1} (large chunk)");
         }
         else
         {
             arrays.packets_count1 = packets_count;
         }
 
-        if (arrays.packets_count1 > packets_count) { LogOodle($"Phase1: packets_count1={arrays.packets_count1} > packets_count={packets_count}"); return -1; }
+        if (arrays.packets_count1 > packets_count) { H.LogOodle($"Phase1: packets_count1={arrays.packets_count1} > packets_count={packets_count}"); return -1; }
 
-        if (comp_end - comp_ptr < 2) { LogOodle("Phase1: num_off16s read failed"); return -1; }
-        uint num_off16s = ReadU16LE(comp_ptr);
+        if (comp_end - comp_ptr < 2) { H.LogOodle("Phase1: num_off16s read failed"); return -1; }
+        uint num_off16s = H.ReadU16LE(comp_ptr);
         comp_ptr += 2;
-        LogOodle($"Phase1: num_off16s={num_off16s}");
+        H.LogOodle($"Phase1: num_off16s={num_off16s}");
 
         if (num_off16s == 0xFFFF)
         {
@@ -3250,7 +3304,7 @@ public static unsafe class OodleDecompressor
         arrays.off16_end = arrays.off16_ptr + 2 * num_off16s;
 
         if (comp_end - comp_ptr < 3) return -1;
-        uint off24_header = ReadU24LE(comp_ptr);
+        uint off24_header = H.ReadU24LE(comp_ptr);
         comp_ptr += 3;
 
         if (off24_header == 0)
@@ -3269,13 +3323,13 @@ public static unsafe class OodleDecompressor
             if (off24_ptr_chunk_count1 == 0xFFF)
             {
                 if (comp_end - comp_ptr < 2) return -1;
-                off24_ptr_chunk_count1 = ReadU16LE(comp_ptr);
+                off24_ptr_chunk_count1 = H.ReadU16LE(comp_ptr);
                 comp_ptr += 2;
             }
             if (off24_ptr_chunk_count2 == 0xFFF)
             {
                 if (comp_end - comp_ptr < 2) return -1;
-                off24_ptr_chunk_count2 = ReadU16LE(comp_ptr);
+                off24_ptr_chunk_count2 = H.ReadU16LE(comp_ptr);
                 comp_ptr += 2;
             }
 
@@ -3319,15 +3373,19 @@ public static unsafe class OodleDecompressor
         {
             if (comp_ptr + 3 > comp_end) return -1;
 
-            uint off24 = ReadU24LE(comp_ptr);
+            uint off24 = H.ReadU24LE(comp_ptr);
+            H.LogOodle($"  unpack_escape_offset[{i}]: raw bytes={comp_ptr[0]:X2} {comp_ptr[1]:X2} {comp_ptr[2]:X2} raw24={off24}");
             comp_ptr += 3;
 
             if (off24 >= NEWLZF_OFFSET_FOURBYTE_THRESHOLD)
             {
                 if (comp_ptr >= comp_end) return -1;
                 uint hi = *comp_ptr++;
+                H.LogOodle($"    4-byte offset: hi={hi:X2} final={off24 + (hi << NEWLZF_OFFSET_FOURBYTE_SHIFT)}");
                 off24 += (hi << NEWLZF_OFFSET_FOURBYTE_SHIFT);
             }
+
+            H.LogOodle($"    offset={off24} max_offset={max_offset}");
 
             if (off24 > max_offset) return -1;
             offsets[i] = off24;
@@ -3344,7 +3402,7 @@ public static unsafe class OodleDecompressor
         if (b > 251)
         {
             if (from + 2 > end) return 0;
-            int up = ReadU16LE(from);
+            int up = H.ReadU16LE(from);
             from += 2;
             b += (up << 2);
         }
@@ -3363,10 +3421,17 @@ public static unsafe class OodleDecompressor
         int neg_offset = -8; // NEWLZF_MIN_OFFSET
         bool isSub = (chunk_type == 0); // NEWLZ_LITERALS_TYPE_SUB=0, NEWLZ_LITERALS_TYPE_RAW=1
 
+        // Save original packets_ptr since we use offsets from it
+        byte* packets_base = arrays.packets_ptr;
+
         for (int twice = 0; twice < 2; twice++)
         {
             byte* chunk_ptr;
             long chunk_len;
+
+            // Local pointers for this parse chunk
+            byte* packets_ptr;
+            byte* packets_end;
 
             if (twice == 0)
             {
@@ -3376,7 +3441,8 @@ public static unsafe class OodleDecompressor
                 arrays.escape_offsets_ptr = arrays.escape_offsets1;
                 arrays.escape_offsets_end = arrays.escape_offsets1 + arrays.escape_offsets_count1;
 
-                arrays.packets_end = arrays.packets_ptr + packets_count1;
+                packets_ptr = packets_base;
+                packets_end = packets_base + packets_count1;
             }
             else
             {
@@ -3388,8 +3454,8 @@ public static unsafe class OodleDecompressor
                 arrays.escape_offsets_ptr = arrays.escape_offsets2;
                 arrays.escape_offsets_end = arrays.escape_offsets2 + arrays.escape_offsets_count2;
 
-                arrays.packets_ptr += packets_count1;
-                arrays.packets_end = arrays.packets_ptr + packets_count2;
+                packets_ptr = packets_base + packets_count1;
+                packets_end = packets_ptr + packets_count2;
             }
 
             byte* to_ptr = chunk_ptr;
@@ -3398,10 +3464,16 @@ public static unsafe class OodleDecompressor
             byte* parse_chunk_end = chunk_ptr + chunk_len;
 
             int packet_num = 0;
-            while (arrays.packets_ptr < arrays.packets_end)
+            while (packets_ptr < packets_end)
             {
                 long out_pos = to_ptr - whole_chunk_ptr;
-                int packet = *arrays.packets_ptr++;
+                int packet = *packets_ptr++;
+
+                // Log all packets in second chunk
+                if (chunk_pos > 0)
+                {
+                    H.LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} ({packet})");
+                }
 
                 if (packet >= 24)
                 {
@@ -3410,12 +3482,12 @@ public static unsafe class OodleDecompressor
                     int ml = (packet >> 3) & 0xF;
                     int offset_mask = (packet >> 7) - 1;
 
-                    int next_offset = -(int)ReadU16LE(arrays.off16_ptr);
+                    int next_offset = -(int)H.ReadU16LE(arrays.off16_ptr);
 
                     // Debug around byte 84
                     if (out_pos <= 90 && out_pos + lrl + ml >= 80)
                     {
-                        LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl} ml={ml} offset_mask={offset_mask} neg_offset={neg_offset} next_offset={next_offset}");
+                        H.LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl} ml={ml} offset_mask={offset_mask} neg_offset={neg_offset} next_offset={next_offset}");
                     }
 
                     // Copy literals
@@ -3457,7 +3529,7 @@ public static unsafe class OodleDecompressor
                     out_pos = to_ptr - whole_chunk_ptr;
                     if (out_pos <= 90 && out_pos + ml >= 80)
                     {
-                        LogOodle($"  Match[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_ptr[0]:X2} {match_ptr[1]:X2} {match_ptr[2]:X2} {match_ptr[3]:X2} {match_ptr[4]:X2} {match_ptr[5]:X2} {match_ptr[6]:X2} {match_ptr[7]:X2}");
+                        H.LogOodle($"  Match[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_ptr[0]:X2} {match_ptr[1]:X2} {match_ptr[2]:X2} {match_ptr[3]:X2} {match_ptr[4]:X2} {match_ptr[5]:X2} {match_ptr[6]:X2} {match_ptr[7]:X2}");
                     }
 
                     // Copy match using 64-bit ops (16 bytes safe, ml <= 15)
@@ -3476,40 +3548,44 @@ public static unsafe class OodleDecompressor
                             int lrl = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
                             lrl += NEWLZF_LRL_EXCESS;
 
-                            // Debug around byte 84
-                            if (escape_out_pos <= 90 && escape_out_pos + lrl >= 80)
-                            {
-                                LogOodle($"Parse[{packet_num}] pos={escape_out_pos} packet=0 (Long LRL) lrl={lrl} neg_offset={neg_offset}");
-                            }
+                            H.LogOodle($"Parse[{packet_num}] pos={escape_out_pos} packet=0 (Long LRL) lrl={lrl} neg_offset={neg_offset}");
+                            H.LogOodle($"  to_ptr-chunk_ptr={to_ptr - whole_chunk_ptr} parse_chunk_end-chunk_ptr={parse_chunk_end - whole_chunk_ptr} check: to_ptr+lrl={to_ptr + lrl - whole_chunk_ptr} > parse_chunk_end={parse_chunk_end - whole_chunk_ptr}?");
 
                             if (to_ptr + lrl > parse_chunk_end) return -1;
 
                             if (isSub)
                             {
-                                CopySub_SIMD(to_ptr, arrays.literals_ptr, to_ptr + neg_offset, lrl);
+                                H.CopySub_SIMD(to_ptr, arrays.literals_ptr, to_ptr + neg_offset, lrl);
                                 to_ptr += lrl;
                                 arrays.literals_ptr += lrl;
                             }
                             else
                             {
-                                CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
+                                H.CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
                                 to_ptr += lrl;
                                 arrays.literals_ptr += lrl;
                             }
                         }
                         else if (packet == 1) // Long ML, OFF16
                         {
-                            int ml = NEWLZF_ML_EXCESS + newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                            int excess_val = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                            int ml = NEWLZF_ML_EXCESS + excess_val;
+
+                            H.LogOodle($"  packet=1 Long ML OFF16: excess={excess_val} ml={ml}");
 
                             // Read new 16-bit offset
-                            int offset = ReadU16LE(arrays.off16_ptr);
+                            int offset = H.ReadU16LE(arrays.off16_ptr);
                             arrays.off16_ptr += 2;
                             neg_offset = -offset;
+
+                            H.LogOodle($"  offset={offset} neg_offset={neg_offset}");
 
                             byte* match_ptr = to_ptr + neg_offset;
                             if (match_ptr < window_base) return -1;
 
-                            CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                            H.LogOodle($"  to_ptr-chunk={to_ptr - whole_chunk_ptr} match_ptr-window_base={match_ptr - window_base}");
+
+                            H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
                             to_ptr += ml;
                         }
                         else // packet == 2, Long ML + New Offset
@@ -3518,12 +3594,14 @@ public static unsafe class OodleDecompressor
 
                             if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
                             int offset = (int)(*arrays.escape_offsets_ptr++);
-                            neg_offset = -offset;
 
-                            byte* match_ptr = to_ptr + neg_offset;
+                            // IMPORTANT: escape offsets are relative to chunk_ptr, not to_ptr!
+                            byte* match_ptr = chunk_ptr - offset;
+                            neg_offset = (int)(match_ptr - to_ptr);
+
                             if (match_ptr < window_base) return -1;
 
-                            CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                            H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
                             to_ptr += ml;
                         }
                     }
@@ -3531,7 +3609,13 @@ public static unsafe class OodleDecompressor
                     {
                         int ml = packet - 3 + NEWLZF_OFF24_MML_DECODE;
 
-                        if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
+                        H.LogOodle($"Parse[{packet_num}] pos={escape_out_pos} packet={packet} (Short escape off24) ml={ml}");
+
+                        if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end)
+                        {
+                            H.LogOodle($"  ERROR: escape_offsets exhausted! ptr={((long)arrays.escape_offsets_ptr):X} end={((long)arrays.escape_offsets_end):X}");
+                            return -1;
+                        }
                         int offset = (int)(*arrays.escape_offsets_ptr++);
                         neg_offset = -offset;
 
@@ -3546,18 +3630,20 @@ public static unsafe class OodleDecompressor
             }
 
             // Final literals
+            H.LogOodle($"Final literals: twice={twice} to_ptr-chunk={to_ptr - whole_chunk_ptr} parse_chunk_end-chunk={parse_chunk_end - whole_chunk_ptr} isSub={isSub}");
             if (to_ptr < parse_chunk_end)
             {
                 int lrl = (int)(parse_chunk_end - to_ptr);
+                H.LogOodle($"  Copying final {lrl} literals, literals_ptr available={(long)(arrays.literals_end - arrays.literals_ptr)}");
                 if (isSub)
                 {
-                    CopySub_SIMD(to_ptr, arrays.literals_ptr, to_ptr + neg_offset, lrl);
+                    H.CopySub_SIMD(to_ptr, arrays.literals_ptr, to_ptr + neg_offset, lrl);
                     to_ptr += lrl;
                     arrays.literals_ptr += lrl;
                 }
                 else
                 {
-                    CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
+                    H.CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
                     to_ptr += lrl;
                     arrays.literals_ptr += lrl;
                 }
@@ -3634,11 +3720,11 @@ public static unsafe class OodleDecompressor
 
             if (compEnd - compPtr < 4)
             {
-                LogOodle("Not enough data for chunk header");
+                H.LogOodle("Not enough data for chunk header");
                 return -1;
             }
 
-            int chunk_comp_len = (int)ReadU24BE(compPtr);
+            int chunk_comp_len = (int)H.ReadU24BE(compPtr);
 
             if (chunk_comp_len >= (1 << 23))
             {
@@ -3646,11 +3732,11 @@ public static unsafe class OodleDecompressor
                 chunk_comp_len &= (1 << 19) - 1;
                 compPtr += 3;
 
-                LogOodle($"Leviathan_DecodeOneQuantum: chunk_type={chunk_type} chunk_comp_len={chunk_comp_len}");
+                H.LogOodle($"Leviathan_DecodeOneQuantum: chunk_type={chunk_type} chunk_comp_len={chunk_comp_len}");
 
                 if (chunk_comp_len > compEnd - compPtr)
                 {
-                    LogOodle($"chunk_comp_len {chunk_comp_len} > avail {compEnd - compPtr}");
+                    H.LogOodle($"chunk_comp_len {chunk_comp_len} > avail {compEnd - compPtr}");
                     return -1;
                 }
 
@@ -3675,13 +3761,13 @@ public static unsafe class OodleDecompressor
 
                     if (newLZHC_decode_chunk_phase1(chunk_type, compPtr, chunk_comp_end, rawPtr, chunk_len, chunk_pos, scratch_ptr, scratch_end, ref arrays) < 0)
                     {
-                        LogOodle("phase1 failed");
+                        H.LogOodle("phase1 failed");
                         return -1;
                     }
 
                     if (newLZHC_decode_chunk_phase2(chunk_type, rawPtr, chunk_len, chunk_pos, ref arrays) < 0)
                     {
-                        LogOodle("phase2 failed");
+                        H.LogOodle("phase2 failed");
                         return -1;
                     }
                 }
@@ -3706,7 +3792,7 @@ public static unsafe class OodleDecompressor
 
                 if (ret < 0)
                 {
-                    LogOodle($"newLZ_get_array failed in huff-only chunk. Ret={ret}");
+                    H.LogOodle($"newLZ_get_array failed in huff-only chunk. Ret={ret}");
                     return -1;
                 }
 
@@ -3724,7 +3810,7 @@ public static unsafe class OodleDecompressor
 
                 if (literals_len != chunk_len)
                 {
-                    LogOodle($"huff-only chunk length mismatch. Got {literals_len}, expected {chunk_len}");
+                    H.LogOodle($"huff-only chunk length mismatch. Got {literals_len}, expected {chunk_len}");
                     return -1;
                 }
 
@@ -3740,7 +3826,7 @@ public static unsafe class OodleDecompressor
     {
         if (chunk_type != 0 && chunk_type != 1 && chunk_type != 2 && chunk_type != 4)
         {
-            LogOodle($"newLZHC_decode_chunk_phase1: chunk_type {chunk_type} not supported");
+            H.LogOodle($"newLZHC_decode_chunk_phase1: chunk_type {chunk_type} not supported");
             return -1;  // SUB(0), RAW(1), LAMSUB(2), O1(4) supported
         }
 
@@ -3756,7 +3842,7 @@ public static unsafe class OodleDecompressor
         // Minimum 13 bytes needed
         if (chunk_comp_end - comp_ptr < 13)
         {
-            LogOodle($"newLZHC_decode_chunk_phase1: not enough data. avail={chunk_comp_end - comp_ptr} needed=13");
+            H.LogOodle($"newLZHC_decode_chunk_phase1: not enough data. avail={chunk_comp_end - comp_ptr} needed=13");
             return -1;
         }
 
@@ -3776,7 +3862,7 @@ public static unsafe class OodleDecompressor
         // Get offsets u8 array - need to read the header byte first to check for alt offset
         if (comp_ptr >= chunk_comp_end)
         {
-            LogOodle("newLZHC_decode_chunk_phase1: comp_ptr >= chunk_comp_end before offsets");
+            H.LogOodle("newLZHC_decode_chunk_phase1: comp_ptr >= chunk_comp_end before offsets");
             return -1;
         }
 
@@ -3792,7 +3878,7 @@ public static unsafe class OodleDecompressor
         {
             // Alt offset encoding
             offset_alt_modulo = *comp_ptr - 0x80 + 1;
-            LogOodle($"Alt offset encoding: modulo={offset_alt_modulo} chunk_pos={chunk_pos}");
+            H.LogOodle($"Alt offset encoding: modulo={offset_alt_modulo} chunk_pos={chunk_pos}");
             comp_ptr++;
 
             long offsets_count1;
@@ -3838,7 +3924,7 @@ public static unsafe class OodleDecompressor
         long excesses_count;
         if (newLZ_get_arraylens(comp_ptr, chunk_comp_end, &excesses_count, max_num_excesses) < 0) return -1;
 
-        LogOodle($"newLZHC_decode_chunk_phase1: excesses_count={excesses_count}");
+        H.LogOodle($"newLZHC_decode_chunk_phase1: excesses_count={excesses_count}");
 
         scratch_tail -= excesses_count;
         byte* excesses_u8 = scratch_tail;
@@ -3909,14 +3995,14 @@ public static unsafe class OodleDecompressor
         // Get packets array
         if (comp_ptr >= chunk_comp_end)
         {
-            LogOodle($"newLZHC_decode_chunk_phase1: comp_ptr >= chunk_comp_end before packets. avail={chunk_comp_end - comp_ptr}");
+            H.LogOodle($"newLZHC_decode_chunk_phase1: comp_ptr >= chunk_comp_end before packets. avail={chunk_comp_end - comp_ptr}");
             return -1;
         }
 
         long tot_packets_count = 0;
         long max_packets_count = chunk_len / 2;
 
-        LogOodle($"newLZHC_decode_chunk_phase1: getting packets. *comp_ptr={*comp_ptr:X2}");
+        H.LogOodle($"newLZHC_decode_chunk_phase1: getting packets. *comp_ptr={*comp_ptr:X2}");
 
         if (*comp_ptr >= 0x80)
         {
@@ -3953,7 +4039,7 @@ public static unsafe class OodleDecompressor
             long packets_comp_len = newLZ_get_array(&packets, comp_ptr, chunk_comp_end, &tot_packets_count, Math.Min(max_packets_count, scratch_tail - scratch_ptr), force_copy_uncompressed, scratch_ptr, scratch_tail);
             if (packets_comp_len < 0) return -1;
 
-            LogOodle($"newLZHC_decode_chunk_phase1: packets_count={tot_packets_count}");
+            H.LogOodle($"newLZHC_decode_chunk_phase1: packets_count={tot_packets_count}");
 
             comp_ptr += packets_comp_len;
             scratch_ptr += tot_packets_count;
@@ -3965,7 +4051,7 @@ public static unsafe class OodleDecompressor
         // Check scratch bounds
         if (scratch_ptr - scratch_space > 2 * chunk_len)
         {
-            LogOodle($"scratch bounds check failed: used={scratch_ptr - scratch_space} limit={2 * chunk_len}");
+            H.LogOodle($"scratch bounds check failed: used={scratch_ptr - scratch_space} limit={2 * chunk_len}");
             return -1;
         }
 
@@ -3974,29 +4060,29 @@ public static unsafe class OodleDecompressor
         int excess_stream_size = 0;
 
         if (offsets_count == 10498) {
-            LogOodle($"Before varbits decode: comp_ptr={((long)comp_ptr):X} chunk_comp_end={((long)chunk_comp_end):X} varbits_len={chunk_comp_end - comp_ptr}");
+            H.LogOodle($"Before varbits decode: comp_ptr={((long)comp_ptr):X} chunk_comp_end={((long)chunk_comp_end):X} varbits_len={chunk_comp_end - comp_ptr}");
         }
 
         if (newLZ_get_offsets_excesses(comp_ptr, chunk_comp_end, offsets_u8, offsets_u8_2, offsets_count, (uint)offset_alt_modulo, excesses_u8, excesses_count, offsets, excesses, chunk_pos + chunk_len, excess_hdr_byte, excess_stream_size) < 0)
         {
-            LogOodle("newLZ_get_offsets_excesses failed");
+            H.LogOodle("newLZ_get_offsets_excesses failed");
             return -1;
         }
 
         // Debug: dump some offset values after decoding
         if (offsets_count > 10 && chunk_len == 131072)
         {
-            LogOodle($"After offset decode: [0]={offsets[0]} [1]={offsets[1]} [2]={offsets[2]} [3]={offsets[3]} [4]={offsets[4]} chunk_pos={chunk_pos}");
-            LogOodle($"u8 bytes: [0]={offsets_u8[0]:X2} [1]={offsets_u8[1]:X2} [2]={offsets_u8[2]:X2} [3]={offsets_u8[3]:X2} [4]={offsets_u8[4]:X2}");
+            H.LogOodle($"After offset decode: [0]={offsets[0]} [1]={offsets[1]} [2]={offsets[2]} [3]={offsets[3]} [4]={offsets[4]} chunk_pos={chunk_pos}");
+            H.LogOodle($"u8 bytes: [0]={offsets_u8[0]:X2} [1]={offsets_u8[1]:X2} [2]={offsets_u8[2]:X2} [3]={offsets_u8[3]:X2} [4]={offsets_u8[4]:X2}");
             // Dump offsets around index 830-840 for chunk 1
             if (chunk_pos == 131072 && offsets_count > 840)
             {
-                LogOodle($"Offsets around 830: [830]={offsets[830]} [831]={offsets[831]} [832]={offsets[832]} [833]={offsets[833]} [834]={offsets[834]}");
-                LogOodle($"u8 around 830: [830]={offsets_u8[830]:X2} [831]={offsets_u8[831]:X2} [832]={offsets_u8[832]:X2} [833]={offsets_u8[833]:X2} [834]={offsets_u8[834]:X2}");
+                H.LogOodle($"Offsets around 830: [830]={offsets[830]} [831]={offsets[831]} [832]={offsets[832]} [833]={offsets[833]} [834]={offsets[834]}");
+                H.LogOodle($"u8 around 830: [830]={offsets_u8[830]:X2} [831]={offsets_u8[831]:X2} [832]={offsets_u8[832]:X2} [833]={offsets_u8[833]:X2} [834]={offsets_u8[834]:X2}");
             }
         }
 
-        LogOodle($"newLZHC_decode_chunk_phase1 success. consumed={comp_ptr - comp}");
+        H.LogOodle($"newLZHC_decode_chunk_phase1 success. consumed={comp_ptr - comp}");
         return (int)(comp_ptr - comp);
     }
 
@@ -4015,7 +4101,7 @@ public static unsafe class OodleDecompressor
         if (is_identity)
             num_entropy_arrays = num_arrays;
 
-        LogOodle($"newLZ_get_multiarray: num_entropy_arrays={num_entropy_arrays} is_identity={is_identity}");
+        H.LogOodle($"newLZ_get_multiarray: num_entropy_arrays={num_entropy_arrays} is_identity={is_identity}");
 
         if (to_mem == scratch_ptr)
         {
@@ -4057,7 +4143,7 @@ public static unsafe class OodleDecompressor
             long cur_to_len;
             byte* cur_lit_ptr = to_ptr;
             long cur_comp_len = newLZ_get_array(&cur_lit_ptr, comp_ptr, comp_end, &cur_to_len, to_ptr_end - to_ptr, sub_force_copy_uncompressed, scratch_ptr, scratch_end);
-            if (cur_comp_len < 0) { LogOodle($"newLZ_get_multiarray: entropy array {i} failed"); return -1; }
+            if (cur_comp_len < 0) { H.LogOodle($"newLZ_get_multiarray: entropy array {i} failed"); return -1; }
 
             entropy_array_ptrs[i] = cur_lit_ptr;
             entropy_array_lens[i] = cur_to_len;
@@ -4081,10 +4167,10 @@ public static unsafe class OodleDecompressor
         }
 
         // Indexed mode
-        LogOodle("newLZ_get_multiarray: starting indexed logic");
+        H.LogOodle("newLZ_get_multiarray: starting indexed logic");
         if (comp_end - comp_ptr < 3) return -1;
 
-        int varbits_complen = ReadU16LE(comp_ptr);
+        int varbits_complen = H.ReadU16LE(comp_ptr);
         comp_ptr += 2;
 
         bool varbits_complen_flag = (varbits_complen & 0x8000) != 0;
@@ -4092,7 +4178,7 @@ public static unsafe class OodleDecompressor
 
         long num_indices;
         long len_bytes = newLZ_get_arraylens(comp_ptr, comp_end, &num_indices, tot_to_len + 1024);
-        LogOodle($"newLZ_get_multiarray: num_indices={num_indices} varbits_complen_flag={varbits_complen_flag} varbits_complen={varbits_complen}");
+        H.LogOodle($"newLZ_get_multiarray: num_indices={num_indices} varbits_complen_flag={varbits_complen_flag} varbits_complen={varbits_complen}");
         if (len_bytes <= 0) return -1;
 
         long num_intervals = num_indices - num_arrays;
@@ -4114,14 +4200,14 @@ public static unsafe class OodleDecompressor
             long to_len;
             byte* ptr = interval_indices;
             long array_len = newLZ_get_array(&ptr, comp_ptr, comp_end, &to_len, num_indices, false, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_multiarray: indices array_len={array_len} to_len={to_len} expected={num_indices}");
+            H.LogOodle($"newLZ_get_multiarray: indices array_len={array_len} to_len={to_len} expected={num_indices}");
             if (array_len < 0 || to_len != num_indices) return -1;
             comp_ptr += array_len;
 
             // Len log2
             ptr = interval_lenlog2;
             array_len = newLZ_get_array(&ptr, comp_ptr, comp_end, &to_len, num_intervals, false, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_multiarray: lenlog2 array_len={array_len} to_len={to_len} expected={num_intervals}");
+            H.LogOodle($"newLZ_get_multiarray: lenlog2 array_len={array_len} to_len={to_len} expected={num_intervals}");
             if (array_len < 0 || to_len != num_intervals) return -1;
             comp_ptr += array_len;
 
@@ -4138,7 +4224,7 @@ public static unsafe class OodleDecompressor
             if (array_len < 0 || to_len != num_indices) return -1;
             comp_ptr += array_len;
 
-            LogOodle($"newLZ_get_multiarray: lens_and_indices==interval_indices: {(lens_and_indices == interval_indices)}");
+            H.LogOodle($"newLZ_get_multiarray: lens_and_indices==interval_indices: {(lens_and_indices == interval_indices)}");
 
             // Unpack
             for (int i = 0; i < num_indices; i++)
@@ -4151,8 +4237,8 @@ public static unsafe class OodleDecompressor
             // Log first few and last few indices
             if (num_indices >= 5)
             {
-                LogOodle($"newLZ_get_multiarray: first indices: {interval_indices[0]}, {interval_indices[1]}, {interval_indices[2]}, {interval_indices[3]}, {interval_indices[4]}");
-                LogOodle($"newLZ_get_multiarray: last indices: {interval_indices[num_indices-5]}, {interval_indices[num_indices-4]}, {interval_indices[num_indices-3]}, {interval_indices[num_indices-2]}, {interval_indices[num_indices-1]}");
+                H.LogOodle($"newLZ_get_multiarray: first indices: {interval_indices[0]}, {interval_indices[1]}, {interval_indices[2]}, {interval_indices[3]}, {interval_indices[4]}");
+                H.LogOodle($"newLZ_get_multiarray: last indices: {interval_indices[num_indices-5]}, {interval_indices[num_indices-4]}, {interval_indices[num_indices-3]}, {interval_indices[num_indices-2]}, {interval_indices[num_indices-1]}");
             }
 
             num_lens = num_indices;
@@ -4218,28 +4304,28 @@ public static unsafe class OodleDecompressor
 
             if (indi >= num_indices) return -1;
 
-            LogOodle($"newLZ_get_multiarray: starting dest_array {dest_array_i}, indi={indi}, leni={leni}");
+            H.LogOodle($"newLZ_get_multiarray: starting dest_array {dest_array_i}, indi={indi}, leni={leni}");
 
             for (;;)
             {
                 int source = interval_indices[indi++];
-                LogOodle($"newLZ_get_multiarray: indi={indi-1}, source={source}");
+                H.LogOodle($"newLZ_get_multiarray: indi={indi-1}, source={source}");
                 if (source == 0)
                 {
                     leni += eof_len_increment;
                     break;
                 }
-                if (source > num_entropy_arrays) { LogOodle($"newLZ_get_multiarray: source {source} > num_entropy_arrays {num_entropy_arrays}"); return -1; }
+                if (source > num_entropy_arrays) { H.LogOodle($"newLZ_get_multiarray: source {source} > num_entropy_arrays {num_entropy_arrays}"); return -1; }
                 source--;
 
-                if (leni >= num_lens) { LogOodle($"newLZ_get_multiarray: leni {leni} >= num_lens {num_lens}"); return -1; }
+                if (leni >= num_lens) { H.LogOodle($"newLZ_get_multiarray: leni {leni} >= num_lens {num_lens}"); return -1; }
                 long cur_len = interval_lens[leni++];
 
-                LogOodle($"newLZ_get_multiarray: copying from entropy array {source}: cur_len={cur_len}, remaining={entropy_array_lens[source]}, to_space={to_ptr_end - to_ptr}");
+                H.LogOodle($"newLZ_get_multiarray: copying from entropy array {source}: cur_len={cur_len}, remaining={entropy_array_lens[source]}, to_space={to_ptr_end - to_ptr}");
 
-                if (cur_len > entropy_array_lens[source] || cur_len > to_ptr_end - to_ptr) { LogOodle($"newLZ_get_multiarray: copy would overflow"); return -1; }
+                if (cur_len > entropy_array_lens[source] || cur_len > to_ptr_end - to_ptr) { H.LogOodle($"newLZ_get_multiarray: copy would overflow"); return -1; }
 
-                Buffer.MemoryCopy(entropy_array_ptrs[source], to_ptr, cur_len, cur_len);
+                H.CopyBytes_SIMD(to_ptr, entropy_array_ptrs[source], (int)cur_len);
 
                 to_ptr += cur_len;
                 entropy_array_ptrs[source] += cur_len;
@@ -4247,7 +4333,7 @@ public static unsafe class OodleDecompressor
             }
 
             to_lens[dest_array_i] = to_ptr - to_ptrs[dest_array_i];
-            LogOodle($"newLZ_get_multiarray: dest_array_i={dest_array_i} len={to_lens[dest_array_i]}");
+            H.LogOodle($"newLZ_get_multiarray: dest_array_i={dest_array_i} len={to_lens[dest_array_i]}");
         }
 
         return comp_ptr - comp_start;
@@ -4255,8 +4341,8 @@ public static unsafe class OodleDecompressor
 
     private static int newLZHC_decode_chunk_phase2(int chunk_type, byte* chunk_ptr, long chunk_len, long chunk_pos, ref newLZHC_chunk_arrays arrays)
     {
-        LogOodle($"newLZHC_decode_chunk_phase2 start: chunk_type={chunk_type} chunk_len={chunk_len} chunk_pos={chunk_pos} offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} packets={(arrays.packets != null ? "single" : "multi")}");
-        if (chunk_type != 0 && chunk_type != 1 && chunk_type != 2 && chunk_type != 4) { LogOodle($"phase2: invalid chunk_type {chunk_type}"); return -1; }
+        H.LogOodle($"newLZHC_decode_chunk_phase2 start: chunk_type={chunk_type} chunk_len={chunk_len} chunk_pos={chunk_pos} offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} packets={(arrays.packets != null ? "single" : "multi")}");
+        if (chunk_type != 0 && chunk_type != 1 && chunk_type != 2 && chunk_type != 4) { H.LogOodle($"phase2: invalid chunk_type {chunk_type}"); return -1; }
 
         int start_pos = 0;
         if (chunk_pos == 0) start_pos = NEWLZ_MIN_OFFSET;
@@ -4268,11 +4354,11 @@ public static unsafe class OodleDecompressor
         // Debug: for first chunk, dump first 20 and offsets around 545-550
         if (chunk_pos == 0 && arrays.offsets_count > 0)
         {
-            LogOodle($"First chunk offsets sample: [0]={arrays.offsets[0]} [1]={arrays.offsets[1]} [2]={arrays.offsets[2]} [3]={arrays.offsets[3]} [4]={arrays.offsets[4]}");
+            H.LogOodle($"First chunk offsets sample: [0]={arrays.offsets[0]} [1]={arrays.offsets[1]} [2]={arrays.offsets[2]} [3]={arrays.offsets[3]} [4]={arrays.offsets[4]}");
             if (arrays.offsets_count > 550)
             {
-                LogOodle($"Offsets around 545: [545]={arrays.offsets[545]} [546]={arrays.offsets[546]} [547]={arrays.offsets[547]} [548]={arrays.offsets[548]} [549]={arrays.offsets[549]}");
-                LogOodle($"Offsets around 540: [540]={arrays.offsets[540]} [541]={arrays.offsets[541]} [542]={arrays.offsets[542]} [543]={arrays.offsets[543]} [544]={arrays.offsets[544]}");
+                H.LogOodle($"Offsets around 545: [545]={arrays.offsets[545]} [546]={arrays.offsets[546]} [547]={arrays.offsets[547]} [548]={arrays.offsets[548]} [549]={arrays.offsets[549]}");
+                H.LogOodle($"Offsets around 540: [540]={arrays.offsets[540]} [541]={arrays.offsets[541]} [542]={arrays.offsets[542]} [543]={arrays.offsets[543]} [544]={arrays.offsets[544]}");
             }
         }
 
@@ -4297,9 +4383,9 @@ public static unsafe class OodleDecompressor
             // Debug chunk 35
             if (chunk_num == 35)
             {
-                LogOodle($"phase2: chunk#{chunk_num} chunk_type=4 offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} excesses_count={arrays.excesses_count}");
+                H.LogOodle($"phase2: chunk#{chunk_num} chunk_type=4 offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} excesses_count={arrays.excesses_count}");
                 if (arrays.offsets_count > 0)
-                    LogOodle($"phase2: chunk#{chunk_num} offsets[0]={arrays.offsets[0]} [1]={arrays.offsets[1]} [2]={arrays.offsets[2]}");
+                    H.LogOodle($"phase2: chunk#{chunk_num} offsets[0]={arrays.offsets[0]} [1]={arrays.offsets[1]} [2]={arrays.offsets[2]}");
             }
 
             for(int i=0;i<16;i++)
@@ -4333,7 +4419,7 @@ public static unsafe class OodleDecompressor
                 uint dbg_packet_offset = dbg_packet >> NEWLZHC_PACKET_OFFSET_SHIFT;
                 offset_counts[dbg_packet_offset]++;
             }
-            LogOodle($"Chunk packet_offset distribution (chunk_pos={chunk_pos}): 0={offset_counts[0]} 1={offset_counts[1]} 2={offset_counts[2]} 3={offset_counts[3]} 4={offset_counts[4]} 5={offset_counts[5]} 6={offset_counts[6]} 7={offset_counts[7]}");
+            H.LogOodle($"Chunk packet_offset distribution (chunk_pos={chunk_pos}): 0={offset_counts[0]} 1={offset_counts[1]} 2={offset_counts[2]} 3={offset_counts[3]} 4={offset_counts[4]} 5={offset_counts[5]} 6={offset_counts[6]} 7={offset_counts[7]}");
         }
 
         if (arrays.packets != null)
@@ -4353,7 +4439,7 @@ public static unsafe class OodleDecompressor
                 long pnum = packets - arrays.packets - 1;
                 if (pnum >= 838 && pnum <= 842 && chunk_pos > 0)
                 {
-                    LogOodle($"phase2 (chunk1): raw_packet[{pnum}]=0x{packet:X2}");
+                    H.LogOodle($"phase2 (chunk1): raw_packet[{pnum}]=0x{packet:X2}");
                 }
 
                 // Leviathan packet: 3 bits offset | 2 bits lrl | 3 bits ml
@@ -4368,7 +4454,7 @@ public static unsafe class OodleDecompressor
                     // Excess LRL - read FORWARD from excesses_ptr
                     if (excesses_ptr >= excesses_end_ptr)
                     {
-                        LogOodle("phase2: excess LRL overflow (ignored)");
+                        H.LogOodle("phase2: excess LRL overflow (ignored)");
                         lrl = NEWLZHC_PACKET_LRL_MAX;
                     }
                     else
@@ -4395,7 +4481,7 @@ public static unsafe class OodleDecompressor
                 if (chunk_type == 1) // RAW
                 {
                     // Use SIMD for RAW mode
-                    CopyBytes_SIMD(to_ptr, literals_ptr, (int)lrl);
+                    H.CopyBytes_SIMD(to_ptr, literals_ptr, (int)lrl);
                     to_ptr += lrl;
                     literals_ptr += lrl;
                 }
@@ -4422,7 +4508,7 @@ public static unsafe class OodleDecompressor
                         byte output = (byte)(sub + predicted);
                         if (debug_chunk35 && to_ptr - chunk_ptr < 10)
                         {
-                            LogOodle($"LAMSUB first: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
+                            H.LogOodle($"LAMSUB first: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
                         }
                         *to_ptr++ = output;
                         // Rest comes from main literals array like SUB
@@ -4433,7 +4519,7 @@ public static unsafe class OodleDecompressor
                             output = (byte)(sub + predicted);
                             if (debug_chunk35 && to_ptr - chunk_ptr < 10)
                             {
-                                LogOodle($"LAMSUB rest: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
+                                H.LogOodle($"LAMSUB rest: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
                             }
                             *to_ptr++ = output;
                         }
@@ -4442,7 +4528,7 @@ public static unsafe class OodleDecompressor
                 else // SUB (type 0)
                 {
                     // Use SIMD SUB copy
-                    CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)lrl);
+                    H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)lrl);
                     to_ptr += lrl;
                     literals_ptr += lrl;
                 }
@@ -4459,16 +4545,16 @@ public static unsafe class OodleDecompressor
                 long offsets_consumed = offsets_ptr - arrays.offsets;
                 if (debug_chunk35 && packet_num < 3)
                 {
-                    LogOodle($"LAMSUB chunk35: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets[slot7]={lastoffsets[7]}");
+                    H.LogOodle($"LAMSUB chunk35: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets[slot7]={lastoffsets[7]}");
                     // Also show what offsets look like
                     if (offsets_consumed < arrays.offsets_count)
-                        LogOodle($"LAMSUB chunk35: offsets_consumed={offsets_consumed} next_offsets={arrays.offsets[offsets_consumed]},{arrays.offsets[offsets_consumed+1]},{arrays.offsets[offsets_consumed+2]}");
+                        H.LogOodle($"LAMSUB chunk35: offsets_consumed={offsets_consumed} next_offsets={arrays.offsets[offsets_consumed]},{arrays.offsets[offsets_consumed+1]},{arrays.offsets[offsets_consumed+2]}");
                 }
                 if (to_ptr + neg_offset < window_base)
                 {
                     // Also show the current preloaded offset at slot 7
                     int next_offset = (offsets_ptr < arrays.offsets + arrays.offsets_count) ? *offsets_ptr : 0;
-                    LogOodle($"phase2: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets_consumed={offsets_consumed} next_offs={next_offset}");
+                    H.LogOodle($"phase2: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets_consumed={offsets_consumed} next_offs={next_offset}");
                 }
 
                 // MTF: shift values down and put selected value at front
@@ -4488,7 +4574,7 @@ public static unsafe class OodleDecompressor
                     // Excess ML - read BACKWARD from excesses_end_ptr
                     if (excesses_end_ptr <= excesses_ptr)
                     {
-                        LogOodle($"phase2: excess ML overflow (ignored). ptr={(long)excesses_ptr:X} end_ptr={(long)excesses_end_ptr:X} count={arrays.excesses_count}");
+                        H.LogOodle($"phase2: excess ML overflow (ignored). ptr={(long)excesses_ptr:X} end_ptr={(long)excesses_end_ptr:X} count={arrays.excesses_count}");
                         ml = (NEWLZHC_PACKET_ML_MAX + NEWLZHC_LOMML);
                     }
                     else
@@ -4507,16 +4593,16 @@ public static unsafe class OodleDecompressor
                     long remaining = chunk_end - to_ptr;
                     if (debug_chunk35)
                     {
-                        LogOodle($"LAMSUB clamping: to_ptr_pos={to_ptr - chunk_ptr} ml={ml} chunk_end_pos={chunk_end - chunk_ptr} remaining={remaining}");
+                        H.LogOodle($"LAMSUB clamping: to_ptr_pos={to_ptr - chunk_ptr} ml={ml} chunk_end_pos={chunk_end - chunk_ptr} remaining={remaining}");
                     }
-                    if (remaining < 0) { LogOodle($"phase2: match bounds check failed (negative remaining). to_ptr={to_ptr - chunk_ptr} ml={ml} limit={chunk_end - chunk_ptr}"); return -1; }
+                    if (remaining < 0) { H.LogOodle($"phase2: match bounds check failed (negative remaining). to_ptr={to_ptr - chunk_ptr} ml={ml} limit={chunk_end - chunk_ptr}"); return -1; }
                     ml = (uint)remaining;
                 }
                 if (to_ptr + neg_offset < window_base)
                 {
-                    LogOodle($"phase2: window bounds check failed. to_ptr={to_ptr - chunk_ptr} neg_offset={neg_offset} window_base={window_base - chunk_ptr}");
-                    LogOodle($"phase2: packet_offset={packet_offset} lastoffsets={lastoffsets[0]},{lastoffsets[1]},{lastoffsets[2]}...");
-                    LogOodle($"phase2: offsets consumed={(offsets_ptr - arrays.offsets)} packets processed={(packets - arrays.packets)}");
+                    H.LogOodle($"phase2: window bounds check failed. to_ptr={to_ptr - chunk_ptr} neg_offset={neg_offset} window_base={window_base - chunk_ptr}");
+                    H.LogOodle($"phase2: packet_offset={packet_offset} lastoffsets={lastoffsets[0]},{lastoffsets[1]},{lastoffsets[2]}...");
+                    H.LogOodle($"phase2: offsets consumed={(offsets_ptr - arrays.offsets)} packets processed={(packets - arrays.packets)}");
                     return -1;
                 }
 
@@ -4526,13 +4612,13 @@ public static unsafe class OodleDecompressor
                 uint ml_orig = ml;
                 if (debug_chunk35 && to_ptr - chunk_ptr < 20)
                 {
-                    LogOodle($"LAMSUB match: pos={to_ptr - chunk_ptr} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
+                    H.LogOodle($"LAMSUB match: pos={to_ptr - chunk_ptr} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
                 }
-                CopyMatch_SIMD(to_ptr, match_src, (int)ml, -neg_offset);
+                H.CopyMatch_SIMD(to_ptr, match_src, (int)ml, -neg_offset);
                 to_ptr += ml;
                 if (debug_chunk35 && match_dst_start - chunk_ptr < 20)
                 {
-                    LogOodle($"LAMSUB match: ml_orig={ml_orig} wrote bytes {match_dst_start[0]:X2} {match_dst_start[1]:X2} {match_dst_start[2]:X2} {match_dst_start[3]:X2} {match_dst_start[4]:X2} {match_dst_start[5]:X2}");
+                    H.LogOodle($"LAMSUB match: ml_orig={ml_orig} wrote bytes {match_dst_start[0]:X2} {match_dst_start[1]:X2} {match_dst_start[2]:X2} {match_dst_start[3]:X2} {match_dst_start[4]:X2} {match_dst_start[5]:X2}");
                 }
             }
         }
@@ -4573,7 +4659,7 @@ public static unsafe class OodleDecompressor
                 if (lrl_part == NEWLZHC_PACKET_LRL_MAX)
                 {
                     // Excess LRL - read FORWARD
-                    if (excesses_ptr >= excesses_end_ptr) { LogOodle("phase2: excess LRL overflow (multi)"); return -1; }
+                    if (excesses_ptr >= excesses_end_ptr) { H.LogOodle("phase2: excess LRL overflow (multi)"); return -1; }
                     lrl = *excesses_ptr++;
                 }
                 else
@@ -4582,13 +4668,13 @@ public static unsafe class OodleDecompressor
                 }
 
                 // Check bounds
-                if (to_ptr + lrl > chunk_end) { LogOodle($"phase2: LRL bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} lrl={lrl} chunk_end={chunk_end - chunk_ptr}"); return -1; }
+                if (to_ptr + lrl > chunk_end) { H.LogOodle($"phase2: LRL bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} lrl={lrl} chunk_end={chunk_end - chunk_ptr}"); return -1; }
 
                 // Copy literals based on chunk_type (0=SUB, 1=RAW, 2=LAMSUB per SDK)
                 if (chunk_type == 1) // RAW
                 {
                     // Use SIMD for RAW mode
-                    CopyBytes_SIMD(to_ptr, literals_ptr, (int)lrl);
+                    H.CopyBytes_SIMD(to_ptr, literals_ptr, (int)lrl);
                     to_ptr += lrl;
                     literals_ptr += lrl;
                 }
@@ -4624,7 +4710,7 @@ public static unsafe class OodleDecompressor
                 else // SUB (type 0)
                 {
                     // Use SIMD SUB copy
-                    CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)lrl);
+                    H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)lrl);
                     to_ptr += lrl;
                     literals_ptr += lrl;
                 }
@@ -4650,24 +4736,24 @@ public static unsafe class OodleDecompressor
                 if (ml == NEWLZHC_PACKET_ML_MAX + NEWLZHC_LOMML)
                 {
                     // Excess ML - read BACKWARD from excesses_end_ptr
-                    if (excesses_end_ptr <= excesses_ptr) { LogOodle("phase2: excess ML overflow (multi)"); return -1; }
+                    if (excesses_end_ptr <= excesses_ptr) { H.LogOodle("phase2: excess ML overflow (multi)"); return -1; }
                     excesses_end_ptr--;
                     ml = *excesses_end_ptr;
                     ml += (NEWLZHC_PACKET_ML_MAX + NEWLZHC_LOMML) - NEWLZHC_PACKET_LRL_MAX;
                 }
 
                 // Check match bounds
-                if (to_ptr + ml > chunk_end) { LogOodle($"phase2: match bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} ml={ml} limit={chunk_end - chunk_ptr}"); return -1; }
+                if (to_ptr + ml > chunk_end) { H.LogOodle($"phase2: match bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} ml={ml} limit={chunk_end - chunk_ptr}"); return -1; }
                 if (to_ptr + neg_offset < window_base)
                 {
-                    LogOodle($"phase2: window bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} neg_offset={neg_offset} window_base={window_base - chunk_ptr}");
-                    LogOodle($"phase2: packet_offset={packet_offset} lastoffsets={lastoffsets[0]},{lastoffsets[1]},{lastoffsets[2]}...");
+                    H.LogOodle($"phase2: window bounds check failed (multi). to_ptr={to_ptr - chunk_ptr} neg_offset={neg_offset} window_base={window_base - chunk_ptr}");
+                    H.LogOodle($"phase2: packet_offset={packet_offset} lastoffsets={lastoffsets[0]},{lastoffsets[1]},{lastoffsets[2]}...");
                     return -1;
                 }
 
                 // Copy match
                 byte* match_src = to_ptr + neg_offset;
-                CopyMatch_SIMD(to_ptr, match_src, (int)ml, -neg_offset);
+                H.CopyMatch_SIMD(to_ptr, match_src, (int)ml, -neg_offset);
                 to_ptr += ml;
             }
         }
@@ -4680,7 +4766,7 @@ public static unsafe class OodleDecompressor
             if (chunk_type == 1) // RAW (type 0=SUB, type 1=RAW, type 2=LAMSUB per SDK)
             {
                 // Use SIMD for RAW mode
-                CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
+                H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
                 to_ptr += lrl;
             }
             else if (chunk_type == 4) // O1
@@ -4716,12 +4802,12 @@ public static unsafe class OodleDecompressor
             else // SUB (type 0)
             {
                 // Use SIMD SUB copy
-                CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
+                H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
                 to_ptr += lrl;
             }
         }
 
-        if (to_ptr != chunk_end) { LogOodle($"phase2: final check failed. to_ptr != chunk_end. diff={chunk_end - to_ptr}"); return -1; }
+        if (to_ptr != chunk_end) { H.LogOodle($"phase2: final check failed. to_ptr != chunk_end. diff={chunk_end - to_ptr}"); return -1; }
 
         return 1;
     }
@@ -4774,7 +4860,7 @@ public static unsafe class OodleDecompressor
                 }
                 if (cp + lrl > compEnd) return -1;
                 // Use SIMD for literal copy
-                CopyBytes_SIMD(rp, cp, lrl);
+                H.CopyBytes_SIMD(rp, cp, lrl);
                 rp += lrl;
                 cp += lrl;
 
@@ -4786,7 +4872,7 @@ public static unsafe class OodleDecompressor
             {
                 // Short match: read 16-bit offset
                 if (cp + 2 > compEnd) return -1;
-                uint off = ReadU16LE(cp);
+                uint off = H.ReadU16LE(cp);
                 cp += 2;
 
                 if (off == 0 || off > (uint)(rp - dictionaryBase)) return -1;
@@ -4796,14 +4882,14 @@ public static unsafe class OodleDecompressor
 
                 byte* match = rp - off;
                 // Use SIMD match copy
-                CopyMatch_SIMD(rp, match, ml, (int)off);
+                H.CopyMatch_SIMD(rp, match, ml, (int)off);
                 rp += ml;
             }
             else if (ml_control < LZB_MLCONTROL_ESCAPE)
             {
                 // Medium match: read 16-bit offset
                 if (cp + 2 > compEnd) return -1;
-                uint off = ReadU16LE(cp);
+                uint off = H.ReadU16LE(cp);
                 cp += 2;
 
                 if (off == 0 || off > (uint)(rp - dictionaryBase)) return -1;
@@ -4813,7 +4899,7 @@ public static unsafe class OodleDecompressor
 
                 byte* match = rp - off;
                 // Use SIMD match copy
-                CopyMatch_SIMD(rp, match, ml, (int)off);
+                H.CopyMatch_SIMD(rp, match, ml, (int)off);
                 rp += ml;
             }
             else
@@ -4850,15 +4936,15 @@ public static unsafe class OodleDecompressor
                     if (rp + ml > rpEnd) return -1;
 
                     byte* match = rp - off;
-                    // Low offset is 1-7, so can't use 8-byte fast path
-                    while (ml-- > 0)
-                        *rp++ = *match++;
+                    // Low offset is 1-7, use CopyMatch_SIMD which handles small offsets
+                    H.CopyMatch_SIMD(rp, match, ml, (int)off);
+                    rp += ml;
                 }
                 else
                 {
                     // Long offset (16-bit) + extended ML
                     if (cp + 2 > compEnd) return -1;
-                    uint off = ReadU16LE(cp);
+                    uint off = H.ReadU16LE(cp);
                     cp += 2;
 
                     if (off == 0 || off > (uint)(rp - dictionaryBase)) return -1;
@@ -4887,7 +4973,7 @@ public static unsafe class OodleDecompressor
 
                     byte* match = rp - off;
                     // Use SIMD match copy
-                    CopyMatch_SIMD(rp, match, ml, (int)off);
+                    H.CopyMatch_SIMD(rp, match, ml, (int)off);
                     rp += ml;
                 }
             }
@@ -4919,7 +5005,7 @@ public static unsafe class OodleDecompressor
                 return -1;
             }
 
-            int chunk_comp_len = (int)ReadU24BE(compPtr);
+            int chunk_comp_len = (int)H.ReadU24BE(compPtr);
 
             if (chunk_comp_len >= (1 << 23))
             {
@@ -5236,27 +5322,27 @@ public static unsafe class OodleDecompressor
             // Debug near error position (63476)
             if (out_pos >= 63400 && out_pos <= 63550)
             {
-                LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl}(orig={orig_lrl}) ml={packet_ml+2} offset_type={packet_offset} neg_offset={neg_offset} lit_idx={literals_ptr - literals_start} pending_offset={*offsets_ptr}");
+                H.LogOodle($"Parse[{packet_num}] pos={out_pos} packet=0x{packet:X2} lrl={lrl}(orig={orig_lrl}) ml={packet_ml+2} offset_type={packet_offset} neg_offset={neg_offset} lit_idx={literals_ptr - literals_start} pending_offset={*offsets_ptr}");
                 if (lrl > 0)
                 {
-                    LogOodle($"  LitCopy: dst_before[0..3]={to_ptr[0]:X2} {to_ptr[1]:X2} {to_ptr[2]:X2} {to_ptr[3]:X2}");
-                    LogOodle($"  LitCopy: lit[0..3]={literals_ptr[0]:X2} {literals_ptr[1]:X2} {literals_ptr[2]:X2} {literals_ptr[3]:X2}");
+                    H.LogOodle($"  LitCopy: dst_before[0..3]={to_ptr[0]:X2} {to_ptr[1]:X2} {to_ptr[2]:X2} {to_ptr[3]:X2}");
+                    H.LogOodle($"  LitCopy: lit[0..3]={literals_ptr[0]:X2} {literals_ptr[1]:X2} {literals_ptr[2]:X2} {literals_ptr[3]:X2}");
                     byte* sub_src = to_ptr + neg_offset;
-                    LogOodle($"  LitCopy: sub_src[0..3] @ {(sub_src - chunk_base)}={sub_src[0]:X2} {sub_src[1]:X2} {sub_src[2]:X2} {sub_src[3]:X2}");
+                    H.LogOodle($"  LitCopy: sub_src[0..3] @ {(sub_src - chunk_base)}={sub_src[0]:X2} {sub_src[1]:X2} {sub_src[2]:X2} {sub_src[3]:X2}");
                 }
             }
 
             if (isSub)
             {
                 // Use SIMD SUB copy
-                CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
+                H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
                 to_ptr += lrl;
                 literals_ptr += lrl;
             }
             else
             {
                 // Use SIMD for RAW mode
-                CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
+                H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
                 to_ptr += lrl;
                 literals_ptr += lrl;
             }
@@ -5269,7 +5355,7 @@ public static unsafe class OodleDecompressor
                 if (out_pos >= 63400 && out_pos <= 63550)
                 {
                     long offset_idx = offsets_ptr - offsets;
-                    LogOodle($"  Using offset[{offset_idx}] = {offsets[offset_idx]}");
+                    H.LogOodle($"  Using offset[{offset_idx}] = {offsets[offset_idx]}");
                 }
                 offsets_ptr++;
             }
@@ -5292,11 +5378,11 @@ public static unsafe class OodleDecompressor
                 out_pos = to_ptr - chunk_base;
                 if (out_pos >= 63400 && out_pos <= 63550)
                 {
-                    LogOodle($"  ExcessMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
+                    H.LogOodle($"  ExcessMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
                 }
 
                 // Use SIMD match copy
-                CopyMatch_SIMD(to_ptr, match_src, ml, -neg_offset);
+                H.CopyMatch_SIMD(to_ptr, match_src, ml, -neg_offset);
                 to_ptr += ml;
             }
             else
@@ -5308,7 +5394,7 @@ public static unsafe class OodleDecompressor
                 out_pos = to_ptr - chunk_base;
                 if (out_pos >= 63400 && out_pos <= 63550)
                 {
-                    LogOodle($"  ShortMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
+                    H.LogOodle($"  ShortMatch[{packet_num}] pos={out_pos} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
                 }
 
                 *(ulong*)to_ptr = *(ulong*)match_src;
@@ -5326,14 +5412,14 @@ public static unsafe class OodleDecompressor
             if (isSub)
             {
                 // Use SIMD SUB copy
-                CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
+                H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
                 to_ptr += lrl;
                 literals_ptr += lrl;
             }
             else
             {
                 // Use SIMD for RAW mode
-                CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
+                H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
                 to_ptr += lrl;
                 literals_ptr += lrl;
             }
@@ -5415,7 +5501,7 @@ public static unsafe class OodleDecompressor
         if (ptr + 3 > ptrEnd) return -1;
 
         // rrGetBytes_U24 is Big Endian
-        uint header = ReadU24BE(ptr);
+        uint header = H.ReadU24BE(ptr);
         ptr += 3;
 
         uint packedCompLen = header & 0x3FFFF; // PACKED_LQH_FLAG_COMPLEN
@@ -5446,7 +5532,7 @@ public static unsafe class OodleDecompressor
                 if (doCRC)
                 {
                     if (ptr + 3 > ptrEnd) return -1;
-                    pQH.crc = ReadU24BE(ptr);
+                    pQH.crc = H.ReadU24BE(ptr);
                     ptr += 3;
                 }
             }
@@ -5464,7 +5550,7 @@ public static unsafe class OodleDecompressor
             if (doCRC)
             {
                 if (ptr + 3 > ptrEnd) return -1;
-                pQH.crc = ReadU24BE(ptr);
+                pQH.crc = H.ReadU24BE(ptr);
                 ptr += 3;
             }
         }
@@ -5485,7 +5571,7 @@ public static unsafe class OodleDecompressor
         if (ptr + 2 > ptrEnd) return -1;
 
         // rrGetBytes_U16 is Big Endian
-        ushort packedCompLen16 = ReadU16BE(ptr);
+        ushort packedCompLen16 = H.ReadU16BE(ptr);
         ptr += 2;
 
         ushort packedCompLen14 = (ushort)(packedCompLen16 & 0x3FFF);
@@ -5521,7 +5607,7 @@ public static unsafe class OodleDecompressor
                 {
                     if (ptr + 3 > ptrEnd) return -1;
                     // rrGetBytes_U24 is Big Endian
-                    pQH.crc = ReadU24BE(ptr);
+                    pQH.crc = H.ReadU24BE(ptr);
                     ptr += 3;
                 }
             }
@@ -5540,7 +5626,7 @@ public static unsafe class OodleDecompressor
             {
                 if (ptr + 3 > ptrEnd) return -1;
                 // rrGetBytes_U24 is Big Endian
-                pQH.crc = ReadU24BE(ptr);
+                pQH.crc = H.ReadU24BE(ptr);
                 ptr += 3;
             }
         }
@@ -5638,11 +5724,11 @@ public static unsafe class OodleDecompressor
         int c_num_non_zero_bits = 3;
         int num_non_zero = (int)rrVarBits_Get_V(ref vbl, (uint)c_num_non_zero_bits) + 2;
 
-        uint max_delta_bits_bits = (uint)(32 - System.Numerics.BitOperations.LeadingZeroCount((uint)L_bits));
+        uint max_delta_bits_bits = (uint)(32 - BitOperations.LeadingZeroCount((uint)L_bits));
         int max_delta_bits = (int)rrVarBits_Get_V(ref vbl, max_delta_bits_bits);
 
-        if (max_delta_bits == 0) { LogOodle("UnPackCounts4: max_delta_bits == 0"); return false; }
-        if (max_delta_bits > L_bits) { LogOodle($"UnPackCounts4: max_delta_bits {max_delta_bits} > L_bits {L_bits}"); return false; }
+        if (max_delta_bits == 0) { H.LogOodle("UnPackCounts4: max_delta_bits == 0"); return false; }
+        if (max_delta_bits > L_bits) { H.LogOodle($"UnPackCounts4: max_delta_bits {max_delta_bits} > L_bits {L_bits}"); return false; }
 
         uint cur = 0;
         uint sum = 0;
@@ -5656,12 +5742,12 @@ public static unsafe class OodleDecompressor
             for(int i=0; i < (num_non_zero-1); i++)
             {
                 int sym = (int)rrVarBits_Get_V(ref vbl, 8);
-                if (seen[sym] != 0) { LogOodle($"UnPackCounts4: seen[{sym}] != 0"); return false; }
+                if (seen[sym] != 0) { H.LogOodle($"UnPackCounts4: seen[{sym}] != 0"); return false; }
 
                 uint delta = (uint)rrVarBits_Get_V(ref vbl, (uint)max_delta_bits);
                 cur += delta;
 
-                if (cur == 0) { LogOodle("UnPackCounts4: cur == 0"); return false; }
+                if (cur == 0) { H.LogOodle("UnPackCounts4: cur == 0"); return false; }
 
                 seen[sym] = 1;
                 if (cur == 1)
@@ -5670,14 +5756,14 @@ public static unsafe class OodleDecompressor
                     *cur_larger++ = ((uint)sym << 16) | cur;
 
                 sum += cur;
-                if (sum >= L) { LogOodle($"UnPackCounts4: sum {sum} >= L {L}"); return false; }
+                if (sum >= L) { H.LogOodle($"UnPackCounts4: sum {sum} >= L {L}"); return false; }
             }
 
             int mps = (int)rrVarBits_Get_V(ref vbl, 8);
-            if (seen[mps] != 0) { LogOodle($"UnPackCounts4: seen[{mps}] != 0 (mps)"); return false; }
+            if (seen[mps] != 0) { H.LogOodle($"UnPackCounts4: seen[{mps}] != 0 (mps)"); return false; }
 
             uint last = L - sum;
-            if (last < cur || last <= 1) { LogOodle($"UnPackCounts4: last {last} < cur {cur} or <= 1"); return false; }
+            if (last < cur || last <= 1) { H.LogOodle($"UnPackCounts4: last {last} < cur {cur} or <= 1"); return false; }
 
             *cur_larger++ = ((uint)mps << 16) | last;
 
@@ -5695,7 +5781,7 @@ public static unsafe class OodleDecompressor
     {
         int expGolombK = (int)rrVarBits_Get_V(ref vbl, 3);
         uint gotNumSyms = (uint)rrVarBits_Get_V(ref vbl, 8) + 1;
-        if (gotNumSyms < 2) { LogOodle("newlz_tans_UnPackCounts_CountDelta: gotNumSyms < 2"); return false; }
+        if (gotNumSyms < 2) { H.LogOodle("newlz_tans_UnPackCounts_CountDelta: gotNumSyms < 2"); return false; }
 
         int numEG = newLZ_decode_alphabet_shape_num_EG((int)gotNumSyms, ref vbl);
 
@@ -5705,7 +5791,7 @@ public static unsafe class OodleDecompressor
         int numUnary = (int)(gotNumSyms + numEG);
         byte* unary = stackalloc byte[numUnary + 16];
 
-        if (newLZ_decode_unary_block(unary, numUnary, ref bbr) != numUnary) { LogOodle("newlz_tans_UnPackCounts_CountDelta: newLZ_decode_unary_block failed"); return false; }
+        if (newLZ_decode_unary_block(unary, numUnary, ref bbr) != numUnary) { H.LogOodle("newlz_tans_UnPackCounts_CountDelta: newLZ_decode_unary_block failed"); return false; }
 
         *(ulong*)(unary + numUnary) = 0;
         *(ulong*)(unary + numUnary + 8) = 0;
@@ -5715,7 +5801,7 @@ public static unsafe class OodleDecompressor
 
         ushort* runLens = stackalloc ushort[128*2 + 1 + 8];
         int numRunPairs = newLZ_decode_alphabet_shape_runlens(runLens, gotNumSyms, (uint)numEG, unary + gotNumSyms, ref vb);
-        if (numRunPairs < 0) { LogOodle("newlz_tans_UnPackCounts_CountDelta: newLZ_decode_alphabet_shape_runlens failed"); return false; }
+        if (numRunPairs < 0) { H.LogOodle("newlz_tans_UnPackCounts_CountDelta: newLZ_decode_alphabet_shape_runlens failed"); return false; }
 
         rrVarBits_Copy(ref vbl, ref vb);
 
@@ -5742,7 +5828,7 @@ public static unsafe class OodleDecompressor
                     int pred = predState >> 2; // COUNT_PRED_GET
 
                     uint nextra = (uint)(*(cur_unary++) + expGolombK);
-                    if (nextra > 15) { LogOodle($"newlz_tans_UnPackCounts_CountDelta: nextra > 15 ({nextra})"); return false; }
+                    if (nextra > 15) { H.LogOodle($"newlz_tans_UnPackCounts_CountDelta: nextra > 15 ({nextra})"); return false; }
 
                     uint delta = (1u << (int)nextra) - golombBias;
                     delta += (uint)rrVarBits_Get_0Ok(ref vbl, (uint)nextra);
@@ -5753,7 +5839,7 @@ public static unsafe class OodleDecompressor
                     predState = predState - pred + Math.Min(count, pred * 2);
 
                     count++;
-                    if (count <= 0) { LogOodle($"newlz_tans_UnPackCounts_CountDelta: count <= 0 ({count})"); return false; }
+                    if (count <= 0) { H.LogOodle($"newlz_tans_UnPackCounts_CountDelta: count <= 0 ({count})"); return false; }
 
                     *cur_single = (byte)i;
                     *cur_larger = (i << 16) + (uint)count;
@@ -5770,7 +5856,7 @@ public static unsafe class OodleDecompressor
             counts.num_larger = (int)(cur_larger - pLargerBase);
         }
 
-        if (count_sum != L) { LogOodle($"newlz_tans_UnPackCounts_CountDelta: count_sum != L ({count_sum} != {L})"); return false; }
+        if (count_sum != L) { H.LogOodle($"newlz_tans_UnPackCounts_CountDelta: count_sum != L ({count_sum} != {L})"); return false; }
 
         return true;
     }
@@ -5785,16 +5871,16 @@ public static unsafe class OodleDecompressor
         uint type = rrVarBits_Get1(ref vbl);
         if (type != 0)
         {
-            LogOodle("newlz_tans_UnPackCounts: calling CountDelta");
+            H.LogOodle("newlz_tans_UnPackCounts: calling CountDelta");
             ret = newlz_tans_UnPackCounts_CountDelta(L_bits, ref counts, ref vbl);
         }
         else
         {
-            LogOodle("newlz_tans_UnPackCounts: calling UnPackCounts4");
+            H.LogOodle("newlz_tans_UnPackCounts: calling UnPackCounts4");
             ret = newlz_tans_UnPackCounts4(L_bits, ref counts, ref vbl);
         }
 
-        if (!ret) { LogOodle("newlz_tans_UnPackCounts: sub-function failed"); return false; }
+        if (!ret) { H.LogOodle("newlz_tans_UnPackCounts: sub-function failed"); return false; }
 
         rrVarBits_Copy(ref vb, ref vbl);
         return true;
@@ -5871,14 +5957,14 @@ public static unsafe class OodleDecompressor
 
                     for (int c = 0; c < count; c++)
                     {
-                        int r = System.Numerics.BitOperations.TrailingZeroCount(mask);
+                        int r = BitOperations.TrailingZeroCount(mask);
                         mask &= mask - 1;
 
                         ulong* pdest = bucket_ptr[r];
                         bucket_ptr[r]++;
 
                         int from_state = (int)count + c;
-                        int num_bits = L_bits - (31 - System.Numerics.BitOperations.LeadingZeroCount((uint)from_state));
+                        int num_bits = L_bits - (31 - BitOperations.LeadingZeroCount((uint)from_state));
 
                         tans_decode_entry_U8* entry = (tans_decode_entry_U8*)pdest;
                         entry->sym = (byte)sym;
@@ -5890,7 +5976,7 @@ public static unsafe class OodleDecompressor
                 }
                 else
                 {
-                    int bsr_start = 31 - System.Numerics.BitOperations.LeadingZeroCount(count);
+                    int bsr_start = 31 - BitOperations.LeadingZeroCount(count);
                     int num_bits = L_bits - bsr_start;
                     int count_threshold = (1 << (bsr_start + 1)) - (int)count;
 
@@ -5978,7 +6064,7 @@ public static unsafe class OodleDecompressor
 
         if (in1 < in0)
         {
-            LogOodle($"tansx2_finish: in1 < in0. in_left={in1-in0} missing_symbols={decodeend-decodeptr}");
+            H.LogOodle($"tansx2_finish: in1 < in0. in_left={in1-in0} missing_symbols={decodeend-decodeptr}");
             return false;
         }
 
@@ -5997,7 +6083,7 @@ public static unsafe class OodleDecompressor
             {
                 if (final_nbytes != 0)
                 {
-                    LogOodle($"tansx2_finish: final_nbytes!=0. in_left={in_left} missing_symbols={decodeend-decodeptr}");
+                    H.LogOodle($"tansx2_finish: final_nbytes!=0. in_left={in_left} missing_symbols={decodeend-decodeptr}");
                     return false;
                 }
 
@@ -6006,7 +6092,7 @@ public static unsafe class OodleDecompressor
                 in_left = in1 - in0;
                 if (in_left < 0)
                 {
-                    LogOodle($"tansx2_finish: in_left < 0. in_left={in_left}");
+                    H.LogOodle($"tansx2_finish: in_left < 0. in_left={in_left}");
                     return false;
                 }
 
@@ -6027,7 +6113,7 @@ public static unsafe class OodleDecompressor
             tans_decode_entry_U8 entry;
 
             // REFILL0
-            bits0 |= ReadU32LE(in0) << bitc0;
+            bits0 |= H.ReadU32LE(in0) << bitc0;
             in0 += (31 - bitc0) >> 3;
             bitc0 |= 24;
 
@@ -6050,7 +6136,7 @@ public static unsafe class OodleDecompressor
             if (decodeptr >= decodeend) break;
 
             // REFILL0
-            bits0 |= ReadU32LE(in0) << bitc0;
+            bits0 |= H.ReadU32LE(in0) << bitc0;
             in0 += (31 - bitc0) >> 3;
             bitc0 |= 24;
 
@@ -6073,7 +6159,7 @@ public static unsafe class OodleDecompressor
             if (decodeptr >= decodeend) break;
 
             // REFILL0
-            bits0 |= ReadU32LE(in0) << bitc0;
+            bits0 |= H.ReadU32LE(in0) << bitc0;
             in0 += (31 - bitc0) >> 3;
             bitc0 |= 24;
 
@@ -6087,7 +6173,7 @@ public static unsafe class OodleDecompressor
             if (decodeptr >= decodeend) break;
 
             // REFILL1
-            bits1 |= ReadU32BE(in1 - 4) << bitc1;
+            bits1 |= H.ReadU32BE(in1 - 4) << bitc1;
             in1 -= (31 - bitc1) >> 3;
             bitc1 |= 24;
 
@@ -6110,7 +6196,7 @@ public static unsafe class OodleDecompressor
             if (decodeptr >= decodeend) break;
 
             // REFILL1
-            bits1 |= ReadU32BE(in1 - 4) << bitc1;
+            bits1 |= H.ReadU32BE(in1 - 4) << bitc1;
             in1 -= (31 - bitc1) >> 3;
             bitc1 |= 24;
 
@@ -6133,7 +6219,7 @@ public static unsafe class OodleDecompressor
             if (decodeptr >= decodeend) break;
 
             // REFILL1
-            bits1 |= ReadU32BE(in1 - 4) << bitc1;
+            bits1 |= H.ReadU32BE(in1 - 4) << bitc1;
             in1 -= (31 - bitc1) >> 3;
             bitc1 |= 24;
 
@@ -6152,12 +6238,8 @@ public static unsafe class OodleDecompressor
         if ((in1 - in0) != final_nbytes) return false;
         if ((tans0 | tans1 | tans2 | tans3 | tans4) > 255) return false;
 
-        // Final 5 states have 5 more bytes
-        decodeend[0] = (byte)tans0;
-        decodeend[1] = (byte)tans1;
-        decodeend[2] = (byte)tans2;
-        decodeend[3] = (byte)tans3;
-        decodeend[4] = (byte)tans4;
+        // Final 5 states have 5 more bytes - write as 1 uint + 1 byte instead of 5 individual bytes
+        H.Write5BytesLE(decodeend, tans0, tans1, tans2, tans3, tans4);
 
         return true;
     }
@@ -6189,11 +6271,11 @@ public static unsafe class OodleDecompressor
                 uint len;
                 tans_decode_entry_U8 entry;
 
-                bits0 |= ReadU64LE(in0) << (int)bitc0;
+                bits0 |= H.ReadU64LE(in0) << (int)bitc0;
                 in0 += (63 - (int)bitc0) >> 3;
                 bitc0 |= 56;
 
-                bits1 |= ReadU64BE(in1) << (int)bitc1;
+                bits1 |= H.ReadU64BE(in1) << (int)bitc1;
                 in1 -= (63 - (int)bitc1) >> 3;
                 bitc1 |= 56;
 
@@ -6288,10 +6370,10 @@ public static unsafe class OodleDecompressor
             s.tans_state[4] = tans4;
         }
 
-        LogOodle($"tansx2_64: loop ended. in0={ (long)s.bitp[0] } in1={ (long)s.bitp[1] } decodeptr={ (long)s.decodeptr } decodeend={ (long)s.decodeend }");
+        H.LogOodle($"tansx2_64: loop ended. in0={ (long)s.bitp[0] } in1={ (long)s.bitp[1] } decodeptr={ (long)s.decodeptr } decodeend={ (long)s.decodeend }");
 
-        LogOodle($"tansx2_64: calling tansx2_finish, remaining={s.decodeend - s.decodeptr}");
-        if (!tansx2_finish(ref s)) { LogOodle("tansx2_64: tansx2_finish failed"); return false; }
+        H.LogOodle($"tansx2_64: calling tansx2_finish, remaining={s.decodeend - s.decodeptr}");
+        if (!tansx2_finish(ref s)) { H.LogOodle("tansx2_64: tansx2_finish failed"); return false; }
         return true;
     }
 
@@ -6300,8 +6382,8 @@ public static unsafe class OodleDecompressor
         byte* comp_ptr = comp;
         byte* comp_end = comp + comp_len;
 
-        if (comp_len < 8) { LogOodle("newlz_get_array_tans: comp_len < 8"); return -1; }
-        if (to_len < 5) { LogOodle("newlz_get_array_tans: to_len < 5"); return -1; }
+        if (comp_len < 8) { H.LogOodle("newlz_get_array_tans: comp_len < 8"); return -1; }
+        if (to_len < 5) { H.LogOodle("newlz_get_array_tans: to_len < 5"); return -1; }
 
         int L_bits;
         newlz_tans_UnpackedCounts unpacked_counts = new newlz_tans_UnpackedCounts();
@@ -6311,25 +6393,25 @@ public static unsafe class OodleDecompressor
             rrVarBits_GetOpen(ref header_vb, comp_ptr, comp_end);
 
             uint flag = rrVarBits_Get1(ref header_vb);
-            if (flag != 0) { LogOodle("newlz_get_array_tans: flag != 0"); return -1; }
+            if (flag != 0) { H.LogOodle("newlz_get_array_tans: flag != 0"); return -1; }
 
             L_bits = (int)rrVarBits_Get_C(ref header_vb, NEWLZ_TANS_L_BITS_BITS);
             L_bits += NEWLZ_TANS_L_BITS_MIN;
-            if (L_bits > NEWLZ_TANS_L_BITS_MAX) { LogOodle($"newlz_get_array_tans: L_bits invalid ({L_bits})"); return -1; }
-            LogOodle($"newlz_get_array_tans: L_bits={L_bits}");
+            if (L_bits > NEWLZ_TANS_L_BITS_MAX) { H.LogOodle($"newlz_get_array_tans: L_bits invalid ({L_bits})"); return -1; }
+            H.LogOodle($"newlz_get_array_tans: L_bits={L_bits}");
 
-            if (!newlz_tans_UnPackCounts(ref header_vb, L_bits, ref unpacked_counts)) { LogOodle("newlz_get_array_tans: newlz_tans_UnPackCounts failed"); return -1; }
+            if (!newlz_tans_UnPackCounts(ref header_vb, L_bits, ref unpacked_counts)) { H.LogOodle("newlz_get_array_tans: newlz_tans_UnPackCounts failed"); return -1; }
 
             comp_ptr = header_vb.m_cur - ((63 - header_vb.m_inv_bitlen) >> 3); // rrVarBits_GetEndPtr
         }
 
         long tans_compLen = comp_end - comp_ptr;
-        LogOodle($"newlz_get_array_tans: tans_compLen={tans_compLen} header_size={comp_ptr - comp}");
+        H.LogOodle($"newlz_get_array_tans: tans_compLen={tans_compLen} header_size={comp_ptr - comp}");
 
         byte* comp_scratch = stackalloc byte[2 * 8 + 8];
         if (tans_compLen < 8)
         {
-            if (tans_compLen <= 0) { LogOodle("newlz_get_array_tans: tans_compLen <= 0"); return -1; }
+            if (tans_compLen <= 0) { H.LogOodle("newlz_get_array_tans: tans_compLen <= 0"); return -1; }
             new Span<byte>(comp_scratch, 2 * 8 + 8).Clear();
             Buffer.MemoryCopy(comp_ptr, comp_scratch + 8, tans_compLen, tans_compLen);
             comp_ptr = comp_scratch + 8;
@@ -6339,9 +6421,9 @@ public static unsafe class OodleDecompressor
         long decmemsize = (1L << L_bits) * sizeof(tans_decode_entry_U8);
         decmemsize = (decmemsize + 15) & ~15; // Align up
 
-        if ((scratch_end - scratch_ptr) < 16) { LogOodle("newlz_get_array_tans: scratch too small (1)"); return -1; }
+        if ((scratch_end - scratch_ptr) < 16) { H.LogOodle("newlz_get_array_tans: scratch too small (1)"); return -1; }
         scratch_ptr = (byte*)(((long)scratch_ptr + 15) & ~15);
-        if ((scratch_end - scratch_ptr) < decmemsize) { LogOodle($"newlz_get_array_tans: scratch too small (2) needed={decmemsize} avail={scratch_end - scratch_ptr}"); return -1; }
+        if ((scratch_end - scratch_ptr) < decmemsize) { H.LogOodle($"newlz_get_array_tans: scratch too small (2) needed={decmemsize} avail={scratch_end - scratch_ptr}"); return -1; }
 
         newlz_tans_Decoder dec = new newlz_tans_Decoder();
         dec.L = 1 << L_bits;
@@ -6352,12 +6434,12 @@ public static unsafe class OodleDecompressor
 
         {
             byte* lvb1_ptr = comp_ptr;
-            ulong lvb1_bits = ReadU64LE(lvb1_ptr);
+            ulong lvb1_bits = H.ReadU64LE(lvb1_ptr);
             int lvb1_bitcnt = 64;
             lvb1_ptr += 8;
 
             byte* lvb2_ptr = comp_end - 8;
-            ulong lvb2_bits = ReadU64BE(lvb2_ptr);
+            ulong lvb2_bits = H.ReadU64BE(lvb2_ptr);
             int lvb2_bitcnt = 64;
             lvb2_ptr -= 8;
 
@@ -6402,8 +6484,8 @@ public static unsafe class OodleDecompressor
             s.bitp[0] = lvb1_ptr - (lvb1_bitcnt >> 3);
             s.bitp[1] = lvb2_ptr + 8 + (lvb2_bitcnt >> 3);
 
-            LogOodle($"newlz_get_array_tans: lvb1_bitcnt={lvb1_bitcnt} lvb2_bitcnt={lvb2_bitcnt}");
-            LogOodle($"newlz_get_array_tans: s.bitp[0]={(long)s.bitp[0]} s.bitp[1]={(long)s.bitp[1]}");
+            H.LogOodle($"newlz_get_array_tans: lvb1_bitcnt={lvb1_bitcnt} lvb2_bitcnt={lvb2_bitcnt}");
+            H.LogOodle($"newlz_get_array_tans: s.bitp[0]={(long)s.bitp[0]} s.bitp[1]={(long)s.bitp[1]}");
 
             // Store full 32 bits of the remaining bit buffer (C++ just casts to U32)
             s.bits[0] = (uint)lvb1_bits;
@@ -6418,12 +6500,12 @@ public static unsafe class OodleDecompressor
 
             if (true) // Use tansx2_64 fast path
             {
-                if (!tansx2_64(ref s)) { LogOodle("newlz_get_array_tans: tansx2_64 failed"); return -1; }
+                if (!tansx2_64(ref s)) { H.LogOodle("newlz_get_array_tans: tansx2_64 failed"); return -1; }
             }
             /*else
             {
-                //LogOodle($"newlz_get_array_tans: L_bits={L_bits}, skipping tansx2_64");
-                if (!tansx2_finish(ref s)) { LogOodle("newlz_get_array_tans: tansx2_finish failed"); return -1; }
+                //H.LogOodle($"newlz_get_array_tans: L_bits={L_bits}, skipping tansx2_64");
+                if (!tansx2_finish(ref s)) { H.LogOodle("newlz_get_array_tans: tansx2_finish failed"); return -1; }
             }*/
         }
 
@@ -6462,20 +6544,20 @@ public static unsafe class OodleDecompressor
         byte* to_ptr = to;
         byte* to_ptr_end = to + to_len;
 
-        LogOodle($"newLZ_get_array_split: num_splits={num_splits} to_len={to_len}");
+        H.LogOodle($"newLZ_get_array_split: num_splits={num_splits} to_len={to_len}");
 
         for (int i = 0; i < num_splits; i++)
         {
             long cur_to_len;
             long cur_comp_len = newLZ_get_array(&to_ptr, comp_ptr, comp_end, &cur_to_len, to_ptr_end - to_ptr, true, scratch_ptr, scratch_end);
-            LogOodle($"newLZ_get_array_split: split {i} cur_to_len={cur_to_len} cur_comp_len={cur_comp_len} to_ptr offset={(long)(to_ptr - to)}");
+            H.LogOodle($"newLZ_get_array_split: split {i} cur_to_len={cur_to_len} cur_comp_len={cur_comp_len} to_ptr offset={(long)(to_ptr - to)}");
             if (cur_comp_len < 0) return -1;
 
             to_ptr += cur_to_len;
             comp_ptr += cur_comp_len;
         }
 
-        LogOodle($"newLZ_get_array_split: after loop to_ptr offset={(long)(to_ptr - to)} expected={to_len}");
+        H.LogOodle($"newLZ_get_array_split: after loop to_ptr offset={(long)(to_ptr - to)} expected={to_len}");
         if (to_ptr != to_ptr_end) return -1;
 
         return comp_ptr - comp_start;
