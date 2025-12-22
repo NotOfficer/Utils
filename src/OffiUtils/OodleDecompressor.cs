@@ -4178,17 +4178,15 @@ public static unsafe class OodleDecompressor
 
         if (!varbits_complen_flag)
         {
-            // Indices
+            // Indices - newLZ_get_array may update the pointer to point to uncompressed data in stream
             long to_len;
-            byte* ptr = interval_indices;
-            long array_len = newLZ_get_array(&ptr, comp_ptr, comp_end, &to_len, num_indices, false, scratch_ptr, scratch_end);
+            long array_len = newLZ_get_array(&interval_indices, comp_ptr, comp_end, &to_len, num_indices, false, scratch_ptr, scratch_end);
             H.LogOodle($"newLZ_get_multiarray: indices array_len={array_len} to_len={to_len} expected={num_indices}");
             if (array_len < 0 || to_len != num_indices) return -1;
             comp_ptr += array_len;
 
-            // Len log2
-            ptr = interval_lenlog2;
-            array_len = newLZ_get_array(&ptr, comp_ptr, comp_end, &to_len, num_intervals, false, scratch_ptr, scratch_end);
+            // Len log2 - newLZ_get_array may update the pointer to point to uncompressed data in stream
+            array_len = newLZ_get_array(&interval_lenlog2, comp_ptr, comp_end, &to_len, num_intervals, false, scratch_ptr, scratch_end);
             H.LogOodle($"newLZ_get_multiarray: lenlog2 array_len={array_len} to_len={to_len} expected={num_intervals}");
             if (array_len < 0 || to_len != num_intervals) return -1;
             comp_ptr += array_len;
