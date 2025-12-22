@@ -3806,10 +3806,11 @@ public static unsafe class OodleDecompressor
 
     private static int newLZHC_decode_chunk_phase1(int chunk_type, byte* comp, byte* chunk_comp_end, byte* chunk_ptr, long chunk_len, long chunk_pos, byte* scratch_space, byte* scratch_end, ref newLZHC_chunk_arrays arrays)
     {
-        if (chunk_type != 0 && chunk_type != 1 && chunk_type != 2 && chunk_type != 4)
+        // SUB(0), RAW(1), LAMSUB(2), SUBAND3(3), O1(4), SUBANDF(5) supported
+        if (chunk_type < 0 || chunk_type > 5)
         {
             H.LogOodle($"newLZHC_decode_chunk_phase1: chunk_type {chunk_type} not supported");
-            return -1;  // SUB(0), RAW(1), LAMSUB(2), O1(4) supported
+            return -1;
         }
 
         const bool force_copy_uncompressed = true;
@@ -3935,7 +3936,9 @@ public static unsafe class OodleDecompressor
         {
             int num_literals_arrays = 1;
             if (chunk_type == 2) num_literals_arrays = 2; // NEWLZ_LITERALS_TYPE_LAMSUB
+            if (chunk_type == 3) num_literals_arrays = 4; // NEWLZ_LITERALS_TYPE_SUBAND3
             if (chunk_type == 4) num_literals_arrays = 16; // NEWLZ_LITERALS_TYPE_O1
+            if (chunk_type == 5) num_literals_arrays = 16; // NEWLZ_LITERALS_TYPE_SUBANDF
 
             long tot_literals_count;
 
@@ -4322,7 +4325,8 @@ public static unsafe class OodleDecompressor
     private static int newLZHC_decode_chunk_phase2(int chunk_type, byte* chunk_ptr, long chunk_len, long chunk_pos, ref newLZHC_chunk_arrays arrays)
     {
         H.LogOodle($"newLZHC_decode_chunk_phase2 start: chunk_type={chunk_type} chunk_len={chunk_len} chunk_pos={chunk_pos} offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} packets={(arrays.packets != null ? "single" : "multi")}");
-        if (chunk_type != 0 && chunk_type != 1 && chunk_type != 2 && chunk_type != 4) { H.LogOodle($"phase2: invalid chunk_type {chunk_type}"); return -1; }
+        // SUB(0), RAW(1), LAMSUB(2), SUBAND3(3), O1(4), SUBANDF(5) supported
+        if (chunk_type < 0 || chunk_type > 5) { H.LogOodle($"phase2: invalid chunk_type {chunk_type}"); return -1; }
 
         int start_pos = 0;
         if (chunk_pos == 0) start_pos = NEWLZ_MIN_OFFSET;
@@ -4350,6 +4354,11 @@ public static unsafe class OodleDecompressor
         byte* literals_ptr = arrays.GetLiteralsPtr(0);
         byte* literals_ptr_lam = (chunk_type == 2) ? arrays.GetLiteralsPtr(1) : null; // LAMSUB second array
 
+        // SUBAND3 uses 4 literal arrays indexed by (position & 3)
+        byte** literals_ptrs_suband3 = stackalloc byte*[4];
+        // SUBANDF uses 16 literal arrays indexed by (position & 15)
+        byte** literals_ptrs_subandf = stackalloc byte*[16];
+
         byte** literals_ptrs_o1 = stackalloc byte*[16];
         byte* next_literals_o1 = stackalloc byte[16];
 
@@ -4357,6 +4366,18 @@ public static unsafe class OodleDecompressor
 
         // Debug for LAMSUB chunk 35
         bool debug_chunk35 = (chunk_num == 35 && chunk_type == 2);
+
+        if (chunk_type == 3) // SUBAND3
+        {
+            for (int i = 0; i < 4; i++)
+                literals_ptrs_suband3[i] = arrays.GetLiteralsPtr(i);
+        }
+
+        if (chunk_type == 5) // SUBANDF
+        {
+            for (int i = 0; i < 16; i++)
+                literals_ptrs_subandf[i] = arrays.GetLiteralsPtr(i);
+        }
 
         if (chunk_type == 4)
         {
@@ -4503,6 +4524,28 @@ public static unsafe class OodleDecompressor
                             }
                             *to_ptr++ = output;
                         }
+                    }
+                }
+                else if (chunk_type == 3) // SUBAND3
+                {
+                    // SUBAND3: literal array indexed by (position & 3), SUB mode
+                    for (long i = 0; i < lrl; i++)
+                    {
+                        int idx = ((int)(to_ptr - chunk_ptr)) & 3;
+                        byte sub = *literals_ptrs_suband3[idx]++;
+                        byte predicted = to_ptr[neg_offset];
+                        *to_ptr++ = (byte)(sub + predicted);
+                    }
+                }
+                else if (chunk_type == 5) // SUBANDF
+                {
+                    // SUBANDF: literal array indexed by (position & 15), SUB mode
+                    for (long i = 0; i < lrl; i++)
+                    {
+                        int idx = ((int)(to_ptr - chunk_ptr)) & 15;
+                        byte sub = *literals_ptrs_subandf[idx]++;
+                        byte predicted = to_ptr[neg_offset];
+                        *to_ptr++ = (byte)(sub + predicted);
                     }
                 }
                 else // SUB (type 0)
@@ -4687,6 +4730,28 @@ public static unsafe class OodleDecompressor
                         }
                     }
                 }
+                else if (chunk_type == 3) // SUBAND3
+                {
+                    // SUBAND3: literal array indexed by (position & 3), SUB mode
+                    for (long i = 0; i < lrl; i++)
+                    {
+                        int idx = ((int)(to_ptr - chunk_ptr)) & 3;
+                        byte sub = *literals_ptrs_suband3[idx]++;
+                        byte predicted = to_ptr[neg_offset];
+                        *to_ptr++ = (byte)(sub + predicted);
+                    }
+                }
+                else if (chunk_type == 5) // SUBANDF
+                {
+                    // SUBANDF: literal array indexed by (position & 15), SUB mode
+                    for (long i = 0; i < lrl; i++)
+                    {
+                        int idx = ((int)(to_ptr - chunk_ptr)) & 15;
+                        byte sub = *literals_ptrs_subandf[idx]++;
+                        byte predicted = to_ptr[neg_offset];
+                        *to_ptr++ = (byte)(sub + predicted);
+                    }
+                }
                 else // SUB (type 0)
                 {
                     // Use SIMD SUB copy
@@ -4777,6 +4842,28 @@ public static unsafe class OodleDecompressor
                         *to_ptr = (byte)(*literals_ptr++ + to_ptr[neg_offset]);
                         to_ptr++;
                     }
+                }
+            }
+            else if (chunk_type == 3) // SUBAND3
+            {
+                // SUBAND3: literal array indexed by (position & 3), SUB mode
+                for (int i = 0; i < lrl; i++)
+                {
+                    int idx = ((int)(to_ptr - chunk_ptr)) & 3;
+                    byte sub = *literals_ptrs_suband3[idx]++;
+                    byte predicted = to_ptr[neg_offset];
+                    *to_ptr++ = (byte)(sub + predicted);
+                }
+            }
+            else if (chunk_type == 5) // SUBANDF
+            {
+                // SUBANDF: literal array indexed by (position & 15), SUB mode
+                for (int i = 0; i < lrl; i++)
+                {
+                    int idx = ((int)(to_ptr - chunk_ptr)) & 15;
+                    byte sub = *literals_ptrs_subandf[idx]++;
+                    byte predicted = to_ptr[neg_offset];
+                    *to_ptr++ = (byte)(sub + predicted);
                 }
             }
             else // SUB (type 0)
