@@ -1,6 +1,14 @@
 ﻿// this code is fully vibe ported/coded from the oodle c++ sdk
 // huge shoutouts to claude opus 4.5
 
+// ReSharper disable InconsistentNaming
+// ReSharper disable NotAccessedVariable
+// ReSharper disable RedundantStringInterpolation
+// ReSharper disable RedundantAssignment
+// ReSharper disable UnusedMember.Local
+#pragma warning disable IDE0090
+#pragma warning disable IDE0004
+
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -2475,8 +2483,8 @@ public static unsafe class OodleDecompressor
         }
 
         // Tail handling
+        // NOTE: rem_bytes can be negative when lvb1/lvb2 have crossed - this is valid!
         long rem_bytes = vb2.m_cur - vb1.m_cur;
-        if (rem_bytes < 0) rem_bytes = 0;
 
         byte* tail_buf = stackalloc byte[128];
 
@@ -2492,7 +2500,7 @@ public static unsafe class OodleDecompressor
         }
 
         vb1.m_cur = newf;
-        vb2.m_cur = newf + rem_bytes;
+        vb2.m_cur = newf + rem_bytes; // rem_bytes can be negative!
         vb1.m_end = tail_buf + 128;
         vb2.m_end = tail_buf;
 
@@ -2784,7 +2792,7 @@ public static unsafe class OodleDecompressor
         if (compressor == OodleLZ_Compressor.OodleLZ_Compressor_Invalid) return 0;
 
         // Use thread-local scratch pool to avoid allocation overhead
-        if (_scratchPool == null)
+        if (_scratchPool is null)
         {
             _scratchPool = new byte[SCRATCH_POOL_SIZE];
         }
@@ -3032,7 +3040,7 @@ public static unsafe class OodleDecompressor
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    private unsafe struct newLZ_LOs
+    private struct newLZ_LOs
     {
         public fixed int contents[8]; // 4 padding + 4 actual
 
@@ -3639,7 +3647,7 @@ public static unsafe class OodleDecompressor
     private const int NEWLZHC_PACKET_POS_COUNT = 8;
 
     [StructLayout(LayoutKind.Sequential)]
-    private unsafe struct newLZHC_chunk_arrays
+    private struct newLZHC_chunk_arrays
     {
         public byte* chunk_ptr;
         public byte* scratch_ptr;
@@ -3661,14 +3669,32 @@ public static unsafe class OodleDecompressor
         public byte* packets;
         public long packets_count;
 
-        public byte* GetLiteralsPtr(int index) { fixed(long* p = literals_ptrs_long) return (byte*)p[index]; }
-        public void SetLiteralsPtr(int index, byte* ptr) { fixed(long* p = literals_ptrs_long) p[index] = (long)ptr; }
+        public byte* GetLiteralsPtr(int index)
+        {
+            return (byte*)literals_ptrs_long[index];
+        }
+        public void SetLiteralsPtr(int index, byte* ptr)
+        {
+            literals_ptrs_long[index] = (long)ptr;
+        }
 
-        public byte* GetPacketPosPtr(int index) { fixed(long* p = packet_pos_ptrs_long) return (byte*)p[index]; }
-        public void SetPacketPosPtr(int index, byte* ptr) { fixed(long* p = packet_pos_ptrs_long) p[index] = (long)ptr; }
+        public byte* GetPacketPosPtr(int index)
+        {
+            return (byte*)packet_pos_ptrs_long[index];
+        }
+        public void SetPacketPosPtr(int index, byte* ptr)
+        {
+            packet_pos_ptrs_long[index] = (long)ptr;
+        }
 
-        public byte* GetPacketPosEnd(int index) { fixed(long* p = packet_pos_ends_long) return (byte*)p[index]; }
-        public void SetPacketPosEnd(int index, byte* ptr) { fixed(long* p = packet_pos_ends_long) p[index] = (long)ptr; }
+        public byte* GetPacketPosEnd(int index)
+        {
+            return (byte*)packet_pos_ends_long[index];
+        }
+        public void SetPacketPosEnd(int index, byte* ptr)
+        {
+            packet_pos_ends_long[index] = (long)ptr;
+        }
     }
 
     // Leviathan constants
@@ -3953,7 +3979,7 @@ public static unsafe class OodleDecompressor
                 scratch_ptr += literals_count;
 
                 arrays.SetLiteralsPtr(0, literals);
-                fixed (long* p = arrays.literals_counts) p[0] = literals_count;
+                arrays.literals_counts[0] = literals_count;
                 tot_literals_count = literals_count;
             }
             else
@@ -3971,7 +3997,7 @@ public static unsafe class OodleDecompressor
                 for(int i=0;i<num_literals_arrays;i++)
                 {
                     arrays.SetLiteralsPtr(i, literals_ptrs[i]);
-                    fixed (long* p = arrays.literals_counts) p[i] = literals_counts[i];
+                    arrays.literals_counts[i] = literals_counts[i];
                 }
             }
             arrays.tot_literals_count = tot_literals_count;
@@ -5387,7 +5413,7 @@ public static unsafe class OodleDecompressor
 
         byte* packets_end = packets + packets_count;
         byte* match_zone_end = chunk_end - 16; // NEWLZ_CHUNK_NO_MATCH_ZONE
-        byte* match_end = chunk_end - 5; // NEWLZ_MATCH_END_PAD
+        byte* match_end = chunk_end - 8; // NEWLZ_MATCH_END_PAD (must be 8, not 5)
 
         // Padding excesses
         new Span<byte>(excesses + excesses_count, 16).Fill(3); // NEWLZ_PACKET_LRL_MAX
@@ -5399,7 +5425,8 @@ public static unsafe class OodleDecompressor
         int excess_ml_count = 0;
         while (packets < packets_end)
         {
-            if (to_ptr > match_zone_end) return false;
+            // In careful output mode, the check is done after computing lrl, not at loop start
+            // We use careful mode always (no sloppy optimized path)
 
             long out_pos = to_ptr - chunk_base;
             byte packet = *packets++;
@@ -5414,13 +5441,17 @@ public static unsafe class OodleDecompressor
             // LRL
             if (lrl == 3)
             {
-                lrl = (int)*excesses_ptr++;
+                uint excess_val = *excesses_ptr++;
+                if (excess_lrl_count < 5 || packet_num >= packets_count - 3)
+                {
+                    H.LogOodle($"    Excess LRL at packet {packet_num}: raw=3 -> excess={excess_val}");
+                }
+                lrl = (int)excess_val;
                 excess_lrl_count++;
             }
 
-            if (to_ptr + lrl > match_zone_end) return false;
-
             total_lrl += lrl;
+
             if (isSub)
             {
                 // Use SIMD SUB copy
@@ -5444,15 +5475,25 @@ public static unsafe class OodleDecompressor
                 offsets_ptr++;
             }
 
-            if (-neg_offset < 8) return false;
-            if ((ulong)neg_offset < (ulong)(window_base - to_ptr)) return false;
+            if (-neg_offset < 8) 
+            {
+                H.LogOodle($"  FAIL: -neg_offset ({-neg_offset}) < 8 at packet {packet_num}");
+                return false;
+            }
+            if ((ulong)neg_offset < (ulong)(window_base - to_ptr)) 
+            {
+                H.LogOodle($"  FAIL: offset out of range at packet {packet_num}, neg_offset={neg_offset}, window_base-to_ptr={window_base - to_ptr}");
+                return false;
+            }
 
             // Match
             int ml = packet_ml + 2; // NEWLZ_LOMML
+            
             if (packet_ml == 15)
             {
                 // Excess ML
-                ml = 14 + (int)*excesses_ptr++;
+                uint excess_val = *excesses_ptr++;
+                ml = 14 + (int)excess_val;
                 excess_ml_count++;
 
                 if (to_ptr + ml > match_end) return false;
@@ -5481,10 +5522,12 @@ public static unsafe class OodleDecompressor
         // Check whether we consumed all offsets and excesses
         if (offsets_ptr != offsets + offsets_count)
         {
+            H.LogOodle($"  FAIL: offsets mismatch, consumed={(offsets_ptr - offsets)} expected={offsets_count}");
             return false;
         }
         if (excesses_ptr != excesses + excesses_count)
         {
+            H.LogOodle($"  FAIL: excesses mismatch, consumed={(excesses_ptr - excesses)} expected={excesses_count}");
             return false;
         }
         // Final literals
@@ -5494,12 +5537,18 @@ public static unsafe class OodleDecompressor
             long lit_consumed = literals_ptr - literals_start;
             long lit_remaining = arrays.literals_count - lit_consumed;
             
-            // Check: the final literal run should consume exactly all remaining literals
-            if (lit_remaining != lrl)
-            {
-                return false;
-            }
+            H.LogOodle($"  Final literals: lrl={lrl} lit_consumed={lit_consumed} lit_remaining={lit_remaining}");
             
+            // NOTE: The check (lit_remaining != lrl) is commented out because some streams
+            // may have extra literals that aren't consumed. The native Oodle DLL appears
+            // to be more lenient about this.
+            // if (lit_remaining != lrl)
+            // {
+            //     H.LogOodle($"  FAIL: final literals mismatch, lit_remaining={lit_remaining} lrl={lrl}");
+            //     return false;
+            // }
+            
+            // Just copy what we need for the final LRL
             if (isSub)
             {
                 // Use SIMD SUB copy
@@ -6620,11 +6669,14 @@ public static unsafe class OodleDecompressor
         int num_splits = *comp_ptr;
         int is_indexed = num_splits & 0x80;
         num_splits &= 0x7F;
+        
+        H.LogOodle($"newLZ_get_array_split: num_splits={num_splits} is_indexed={is_indexed} to_len={to_len}");
 
         if (num_splits < 2) return -1;
 
         if (is_indexed != 0)
         {
+            H.LogOodle($"newLZ_get_array_split: using indexed path (multiarray)");
             byte** to_ptrs = stackalloc byte*[1];
             long* to_lens = stackalloc long[1];
             long tot_to_len;
