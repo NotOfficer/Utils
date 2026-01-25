@@ -32,37 +32,155 @@ file static unsafe class H // static Helpers class
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void CopyBytes_SIMD(byte* dst, byte* src, int count)
     {
-        new ReadOnlySpan<byte>(src, count).CopyTo(new Span<byte>(dst, count));
+        // For small counts, use direct 64-bit copies to avoid Span overhead
+        if (count <= 32)
+        {
+            if (count >= 16)
+            {
+                *(ulong*)dst = *(ulong*)src;
+                *(ulong*)(dst + 8) = *(ulong*)(src + 8);
+                if (count > 16)
+                {
+                    *(ulong*)(dst + count - 16) = *(ulong*)(src + count - 16);
+                    *(ulong*)(dst + count - 8) = *(ulong*)(src + count - 8);
+                }
+            }
+            else if (count >= 8)
+            {
+                *(ulong*)dst = *(ulong*)src;
+                *(ulong*)(dst + count - 8) = *(ulong*)(src + count - 8);
+            }
+            else if (count >= 4)
+            {
+                *(uint*)dst = *(uint*)src;
+                *(uint*)(dst + count - 4) = *(uint*)(src + count - 4);
+            }
+            else if (count > 0)
+            {
+                dst[0] = src[0];
+                if (count >= 2) *(ushort*)(dst + count - 2) = *(ushort*)(src + count - 2);
+            }
+        }
+        else
+        {
+            // Large non-overlapping copy; let the runtime use its optimized memcpy
+            Buffer.MemoryCopy(src, dst, count, count);
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void CopyMatch_SIMD(byte* dst, byte* src, int count, int offset)
     {
-        // For non-overlapping copies (offset >= count), use Span.CopyTo
+        // If no overlap, defer to the raw copy path
         if (offset >= count)
         {
-            new ReadOnlySpan<byte>(src, count).CopyTo(new Span<byte>(dst, count));
+            CopyBytes_SIMD(dst, src, count);
+            return;
         }
-        else if (offset >= 32 && Avx.IsSupported)
+
+        // Fast path: large offsets can use 16-byte SIMD copies safely
+        if (offset >= 16 && Sse2.IsSupported)
         {
-            // Overlapping but offset >= 32: safe to use 32-byte AVX copies
-            while (count >= 32) 
-            { 
-                Avx.Store(dst, Avx.LoadVector256(src)); 
-                dst += 32; src += 32; count -= 32; 
+            while (count >= 16)
+            {
+                var v = Sse2.LoadVector128((byte*)src);
+                Sse2.Store((byte*)dst, v);
+                dst += 16; src += 16; count -= 16;
             }
-            while (count >= 8) { *(ulong*)dst = *(ulong*)src; dst += 8; src += 8; count -= 8; }
-            while (count-- > 0) *dst++ = *src++;
+            while (count >= 8)
+            {
+                *(ulong*)dst = *(ulong*)src;
+                dst += 8; src += 8; count -= 8;
+            }
+            if (count > 0)
+            {
+                if (count >= 4)
+                {
+                    *(uint*)dst = *(uint*)src;
+                    *(uint*)(dst + count - 4) = *(uint*)(src + count - 4);
+                }
+                else
+                {
+                    *dst = *src;
+                    if (count >= 2) *(ushort*)(dst + count - 2) = *(ushort*)(src + count - 2);
+                }
+            }
+            return;
         }
-        else if (offset >= 8)
+
+        // Hot path: offset >= 8 (minimum Oodle offset) - most common case
+        if (offset >= 8)
         {
-            // Overlapping but offset >= 8: safe to use 8-byte copies
-            while (count >= 8) { *(ulong*)dst = *(ulong*)src; dst += 8; src += 8; count -= 8; }
-            while (count-- > 0) *dst++ = *src++;
+            // Unroll first 32 bytes (4 iterations) without branch
+            if (count >= 32)
+            {
+                *(ulong*)dst = *(ulong*)src;
+                *(ulong*)(dst + 8) = *(ulong*)(src + 8);
+                *(ulong*)(dst + 16) = *(ulong*)(src + 16);
+                *(ulong*)(dst + 24) = *(ulong*)(src + 24);
+                dst += 32; src += 32; count -= 32;
+            }
+            
+            // 8-byte copies for remaining
+            while (count >= 8)
+            {
+                *(ulong*)dst = *(ulong*)src;
+                dst += 8; src += 8; count -= 8;
+            }
+            // Tail - overlapping writes for 1-7 bytes
+            if (count > 0)
+            {
+                if (count >= 4)
+                {
+                    *(uint*)dst = *(uint*)src;
+                    *(uint*)(dst + count - 4) = *(uint*)(src + count - 4);
+                }
+                else
+                {
+                    *dst = *src;
+                    if (count >= 2) *(ushort*)(dst + count - 2) = *(ushort*)(src + count - 2);
+                }
+            }
+        }
+        else if (offset == 1)
+        {
+            // RLE pattern: fill with single byte value
+            byte val = *src;
+            // Broadcast to 8-byte value for fast fill
+            ulong val8 = val * 0x0101010101010101UL;
+            while (count >= 8)
+            {
+                *(ulong*)dst = val8;
+                dst += 8; count -= 8;
+            }
+            // Tail
+            while (count-- > 0) *dst++ = val;
         }
         else
         {
-            // Small offset 1-7 - must copy byte by byte to handle overlap
+            // Small offset 2-7 - chunked copy with proper overlap handling
+            // Copy 'offset' bytes at a time to handle overlap
+            while (count >= offset)
+            {
+                // Safe to copy 'offset' bytes - they've all been written
+                if (offset >= 4)
+                {
+                    *(uint*)dst = *(uint*)src;
+                    if (offset > 4) { dst[4] = src[4]; if (offset > 5) { dst[5] = src[5]; if (offset > 6) dst[6] = src[6]; } }
+                }
+                else if (offset == 2)
+                {
+                    *(ushort*)dst = *(ushort*)src;
+                }
+                else // offset == 3
+                {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                }
+                dst += offset; src += offset; count -= offset;
+            }
+            // Remaining bytes (0 to offset-1)
             while (count-- > 0) *dst++ = *src++;
         }
     }
@@ -74,51 +192,54 @@ file static unsafe class H // static Helpers class
         // IMPORTANT: match may point to dst + neg_offset (where neg_offset is negative)
         // This creates an overlap situation. The minimum offset is 8, so we can safely
         // copy 8 bytes at a time without reading bytes we just wrote.
+        const ulong mask = 0x7F7F7F7F7F7F7F7FUL;
 
-        int i = 0;
-
-        // Use AVX2 for 32 bytes at a time when the offset is large enough
-        if (Avx2.IsSupported && count >= 32 && (dst - match) >= 32)
+        // If SSE2 is available and match is far enough, use 16-byte vector adds
+        if (Sse2.IsSupported)
         {
-            while (i + 32 <= count)
+            int offset = (int)(dst - match);
+            if (offset >= 16)
             {
-                var lit = Avx.LoadVector256(literals + i);
-                var mat = Avx.LoadVector256(match + i);
-                var sum = Avx2.Add(lit, mat);
-                Avx.Store(dst + i, sum);
-                i += 32;
+                while (count >= 16)
+                {
+                    var litv = Sse2.LoadVector128((byte*)literals);
+                    var matv = Sse2.LoadVector128((byte*)match);
+                    var sum = Sse2.Add(litv, matv); // wrap-around byte add
+                    Sse2.Store((byte*)dst, sum);
+                    literals += 16; match += 16; dst += 16; count -= 16;
+                }
             }
         }
 
-        // Process 8 bytes at a time (safe even with minimum offset of 8)
-        while (i + 8 <= count)
+        // Process 8 bytes at a time using SWAR parallel byte addition
+        while (count >= 8)
         {
-            // Read 8 bytes from literals and match, add them, write to dst
-            ulong lit8 = *(ulong*)(literals + i);
-            ulong match8 = *(ulong*)(match + i);
-
-            // Byte-wise addition: add corresponding bytes with wrap-around
-            // Using the classic SWAR technique for parallel byte addition
-            const ulong lo7mask = 0x7F7F7F7F7F7F7F7FUL;
-            ulong sum = (lit8 & lo7mask) + (match8 & lo7mask);
-            sum ^= (lit8 ^ match8) & ~lo7mask;
-
-            *(ulong*)(dst + i) = sum;
-            i += 8;
+            ulong lit8 = *(ulong*)literals;
+            ulong match8 = *(ulong*)match;
+            // SWAR byte addition: add bytes in parallel without carry propagation
+            *(ulong*)dst = ((lit8 & mask) + (match8 & mask)) ^ ((lit8 ^ match8) & ~mask);
+            literals += 8; match += 8; dst += 8; count -= 8;
         }
 
-        // Handle remaining bytes (0-7)
-        while (i < count)
+        // Handle remaining bytes (0-7) - unrolled
+        if (count >= 4)
         {
-            dst[i] = (byte)(literals[i] + match[i]);
-            i++;
+            dst[0] = (byte)(literals[0] + match[0]);
+            dst[1] = (byte)(literals[1] + match[1]);
+            dst[2] = (byte)(literals[2] + match[2]);
+            dst[3] = (byte)(literals[3] + match[3]);
+            literals += 4; match += 4; dst += 4; count -= 4;
+        }
+        while (count-- > 0)
+        {
+            *dst++ = (byte)(*literals++ + *match++);
         }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void FillBytes(byte* dst, byte value, int count)
     {
-        new Span<byte>(dst, count).Fill(value);
+        Unsafe.InitBlockUnaligned(dst, value, (uint)count);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -187,7 +308,8 @@ public static unsafe class OodleDecompressor
 {
     // Thread-local scratch memory pool to avoid allocation overhead per decompression
     [ThreadStatic]
-    private static byte[]? _scratchPool;
+    private static byte* _scratchPool;
+
     private const int SCRATCH_POOL_SIZE = 3 * 1024 * 1024; // 3MB
 
     static OodleDecompressor()
@@ -259,36 +381,6 @@ public static unsafe class OodleDecompressor
         OodleLZ_Compressor_LZA = 6,
         OodleLZ_Compressor_Count = 14,
         OodleLZ_Compressor_Force32 = 0x40000000
-    }
-
-    private enum OodleLZ_FuzzSafe
-    {
-        OodleLZ_FuzzSafe_No = 0,
-        OodleLZ_FuzzSafe_Yes = 1
-    }
-
-    private enum OodleLZ_CheckCRC
-    {
-        OodleLZ_CheckCRC_No = 0,
-        OodleLZ_CheckCRC_Yes = 1,
-        OodleLZ_CheckCRC_Force32 = 0x40000000
-    }
-
-    private enum OodleLZ_Verbosity
-    {
-        OodleLZ_Verbosity_None = 0,
-        OodleLZ_Verbosity_Minimal = 1,
-        OodleLZ_Verbosity_Some = 2,
-        OodleLZ_Verbosity_Lots = 3,
-        OodleLZ_Verbosity_Force32 = 0x40000000
-    }
-
-    private enum OodleLZ_Decode_ThreadPhase
-    {
-        OodleLZ_Decode_ThreadPhase1 = 1,
-        OodleLZ_Decode_ThreadPhase2 = 2,
-        OodleLZ_Decode_ThreadPhaseAll = 3,
-        OodleLZ_Decode_Unthreaded = OodleLZ_Decode_ThreadPhaseAll
     }
 
     // Constants
@@ -787,7 +879,7 @@ public static unsafe class OodleDecompressor
 
         if (newLZ_decode_unary_block(unary, numUnary, ref bbr) != numUnary) return -1;
 
-        new Span<byte>(unary + numUnary, 16).Clear();
+        Unsafe.InitBlockUnaligned(unary + numUnary, 0, 16);
 
         if (newLZ_decode_rice_U8_bottom_block(unary, gotNumSyms, riceBits, ref bbr) != gotNumSyms) return -1;
 
@@ -985,9 +1077,109 @@ public static unsafe class OodleDecompressor
             byte* in1 = (byte*)s->bitp[1];
             byte* in2 = (byte*)s->bitp[2];
 
-            uint bits0 = s->bits[0]; uint bitc0 = s->bitc[0];
-            uint bits1 = s->bits[1]; uint bitc1 = s->bitc[1];
-            uint bits2 = s->bits[2]; uint bitc2 = s->bitc[2];
+            byte* decodeptr = (byte*)s->decodeptr[0];
+            byte* decodeend = (byte*)s->decodeend[0];
+            byte* strm0_end = (byte*)s->strm0_end[0];
+
+            H.LogOodle($"newlz_huff64: half={half} decodeend-decodeptr={decodeend - decodeptr}");
+
+            // Constants for 64-bit bulk decoding (matching native implementation)
+            const int N_DECS_PER_REFILL = 5;  // With 56 bits and max 11-bit codes, we can decode 5 symbols
+            const int TRIPLE_DECS_PER_REFILL = 3 * N_DECS_PER_REFILL;  // 15 symbols per iteration
+            const int nIterCheck = 8;
+            const int nBytesCheck = nIterCheck * TRIPLE_DECS_PER_REFILL;  // 120 bytes between checks
+            const int nBytesDecOverRead = 7;  // 8-byte access gives 7B overread
+            const int nBytesDecMax = (nBytesCheck * 11 + 7) / 8 + nBytesDecOverRead;  // Max bytes accessed
+
+            bool usedBulk = false;
+            ulong cbits0 = 0, cbits1 = 0, cbits2 = 0;
+            int cbitc0 = 0, cbitc1 = 0, cbitc2 = 0;
+
+            // Bulk loop using 64-bit reads
+            if (decodeend - decodeptr > TRIPLE_DECS_PER_REFILL - 1)
+            {
+                byte* decodeend_bulk = decodeend - (TRIPLE_DECS_PER_REFILL - 1);
+
+                // Bit buffers start empty for bulk loop
+                ulong bits0 = 0, bits1 = 0, bits2 = 0;
+                int bitcount0 = 0, bitcount1 = 0, bitcount2 = 0;
+
+                while (true)
+                {
+                    long nBytesDecLeft = decodeend_bulk - decodeptr;
+                    if (nBytesDecLeft <= 0)
+                        break;
+
+                    byte* decodemark = decodeptr + nBytesCheck;
+                    if (nBytesDecLeft < nBytesCheck)
+                        decodemark = decodeend_bulk;
+
+                    // Go to careful loop once stream pointers crossed or at risk
+                    if (in0 > in2 || (in1 - in2) < nBytesDecMax)
+                        break;
+
+                    // Main loop
+                    while (decodeptr < decodemark)
+                    {
+                        // Refill using 64-bit reads
+                        bits0 |= *(ulong*)in0 << bitcount0;
+                        in0 += (63 - bitcount0) >> 3;
+                        bitcount0 |= 56;
+
+                        bits1 |= H.Bswap64(*(ulong*)(in1 - 8)) << bitcount1;
+                        in1 -= (63 - bitcount1) >> 3;
+                        bitcount1 |= 56;
+
+                        bits2 |= *(ulong*)in2 << bitcount2;
+                        in2 += (63 - bitcount2) >> 3;
+                        bitcount2 |= 56;
+
+                        // Decode 15 symbols (5 per stream x 3 streams)
+                        uint e; int cl;
+
+                        // Round 1
+                        e = table[bits0 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits0 >>= cl; bitcount0 -= cl;
+                        e = table[bits1 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits1 >>= cl; bitcount1 -= cl;
+                        e = table[bits2 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits2 >>= cl; bitcount2 -= cl;
+
+                        // Round 2
+                        e = table[bits0 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits0 >>= cl; bitcount0 -= cl;
+                        e = table[bits1 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits1 >>= cl; bitcount1 -= cl;
+                        e = table[bits2 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits2 >>= cl; bitcount2 -= cl;
+
+                        // Round 3
+                        e = table[bits0 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits0 >>= cl; bitcount0 -= cl;
+                        e = table[bits1 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits1 >>= cl; bitcount1 -= cl;
+                        e = table[bits2 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits2 >>= cl; bitcount2 -= cl;
+
+                        // Round 4
+                        e = table[bits0 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits0 >>= cl; bitcount0 -= cl;
+                        e = table[bits1 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits1 >>= cl; bitcount1 -= cl;
+                        e = table[bits2 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits2 >>= cl; bitcount2 -= cl;
+
+                        // Round 5
+                        e = table[bits0 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits0 >>= cl; bitcount0 -= cl;
+                        e = table[bits1 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits1 >>= cl; bitcount1 -= cl;
+                        e = table[bits2 & 2047]; cl = (int)(e & 0xFF); *decodeptr++ = (byte)(e >> 8); bits2 >>= cl; bitcount2 -= cl;
+                    }
+                }
+
+                // Transition to careful loop - convert 64-bit state back to careful state
+                usedBulk = true;
+                in0 -= (bitcount0 >> 3);
+                in1 += (bitcount1 >> 3);
+                in2 -= (bitcount2 >> 3);
+                cbits0 = bits0 & 0xFF; cbitc0 = bitcount0 & 7;
+                cbits1 = bits1 & 0xFF; cbitc1 = bitcount1 & 7;
+                cbits2 = bits2 & 0xFF; cbitc2 = bitcount2 & 7;
+            }
+
+            if (!usedBulk)
+            {
+                cbits0 = s->bits[0]; cbitc0 = (int)s->bitc[0];
+                cbits1 = s->bits[1]; cbitc1 = (int)s->bitc[1];
+                cbits2 = s->bits[2]; cbitc2 = (int)s->bitc[2];
+            }
 
             if (in0 > in2)
             {
@@ -995,157 +1187,88 @@ public static unsafe class OodleDecompressor
                 return false;
             }
 
-            byte* decodeptr = (byte*)s->decodeptr[0];
-            byte* decodeend = (byte*)s->decodeend[0];
-            byte* strm0_end = (byte*)s->strm0_end[0];
-
-            H.LogOodle($"newlz_huff64: half={half} decodeend-decodeptr={decodeend - decodeptr}");
-
-            // Fast path: when we have plenty of buffer space, use bulk reads
-            byte* decodeend_fast = decodeend - 5; // Leave room for 6 symbols
-            while (decodeptr < decodeend_fast && in2 - in0 >= 4 && in1 - in2 >= 4)
-            {
-                // Bulk refill all streams using 32-bit reads
-                bits0 |= H.ReadU32LE(in0) << (int)bitc0;
-                bits1 |= H.ReadU32BE(in1 - 4) << (int)bitc1;
-                bits2 |= H.ReadU32LE(in2) << (int)bitc2;
-
-                // Decode 6 symbols (2 from each stream)
-                ushort e0 = table[bits0 & 2047];
-                *decodeptr++ = (byte)(e0 >> 8);
-                uint cl0 = (uint)(e0 & 0xFF);
-                bits0 >>= (int)cl0;
-                bitc0 -= cl0;
-
-                ushort e1 = table[bits1 & 2047];
-                *decodeptr++ = (byte)(e1 >> 8);
-                uint cl1 = (uint)(e1 & 0xFF);
-                bits1 >>= (int)cl1;
-                bitc1 -= cl1;
-
-                ushort e2 = table[bits2 & 2047];
-                *decodeptr++ = (byte)(e2 >> 8);
-                uint cl2 = (uint)(e2 & 0xFF);
-                bits2 >>= (int)cl2;
-                bitc2 -= cl2;
-
-                // Second round
-                e0 = table[bits0 & 2047];
-                *decodeptr++ = (byte)(e0 >> 8);
-                cl0 = (uint)(e0 & 0xFF);
-                bits0 >>= (int)cl0;
-                bitc0 -= cl0;
-
-                e1 = table[bits1 & 2047];
-                *decodeptr++ = (byte)(e1 >> 8);
-                cl1 = (uint)(e1 & 0xFF);
-                bits1 >>= (int)cl1;
-                bitc1 -= cl1;
-
-                e2 = table[bits2 & 2047];
-                *decodeptr++ = (byte)(e2 >> 8);
-                cl2 = (uint)(e2 & 0xFF);
-                bits2 >>= (int)cl2;
-                bitc2 -= cl2;
-
-                // Advance pointers
-                in0 += (int)((7 - bitc0) >> 3);
-                bitc0 &= 7;
-                in1 -= (int)((7 - bitc1) >> 3);
-                bitc1 &= 7;
-                in2 += (int)((7 - bitc2) >> 3);
-                bitc2 &= 7;
-
-                if (in0 > in2 || in2 > in1) break;
-            }
-
             // Final/careful loop - handles byte-by-byte refill carefully
             while (decodeptr < decodeend)
             {
-                uint peek, cl, sym;
+                int cl;
+                uint sym;
 
                 // Refill bits0 - forward stream from in0
-                // Only refill when we can safely read
-                if (in2 - in0 > 1)
-                {
-                    bits0 |= (uint)H.ReadU16LE(in0) << (int)bitc0;
-                }
-                else if (in2 - in0 == 1)
-                {
-                    bits0 |= (uint)in0[0] << (int)bitc0;
-                }
+                long avail = in2 - in0;
+                if (avail > 1)
+                    cbits0 |= (ulong)(*(ushort*)in0) << cbitc0;
+                else if (avail == 1)
+                    cbits0 |= (ulong)in0[0] << cbitc0;
 
                 // Decode from stream 0
-                peek = bits0 & 2047;
-                ushort entry0 = table[peek];
-                cl = (uint)(entry0 & 0xFF);
-                sym = (uint)(entry0 >> 8);
+                uint entry0 = table[cbits0 & 2047];
+                cl = (int)(entry0 & 0xFF);
+                sym = entry0 >> 8;
 
-                if (bitc0 + (uint)Math.Min(in2 - in0, 2) * 8 < cl)
+                int availBits = cbitc0 + (int)(avail < 2 ? avail : 2) * 8;
+                if (availBits < cl)
                 {
-                    H.LogOodle($"newlz_huff64: half={half} stream0 not enough bits: bitc0={bitc0} available={(uint)Math.Min(in2 - in0, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream0 not enough bits: bitc0={cbitc0} available={availBits} cl={cl}");
                     return false;
                 }
 
-                bits0 >>= (int)cl;
-                bitc0 -= cl;
-                in0 += (int)((7 - bitc0) >> 3);
-                bitc0 &= 7;
+                cbits0 >>= cl;
+                cbitc0 -= cl;
+                in0 += (7 - cbitc0) >> 3;
+                cbitc0 &= 7;
                 *decodeptr++ = (byte)sym;
 
                 if (decodeptr >= decodeend) break;
 
                 // Refill bits1 and bits2 - they share the middle region
-                if (in1 - in2 > 1)
+                avail = in1 - in2;
+                if (avail > 1)
                 {
-                    // bits1 reads backward from in1
-                    bits1 |= (uint)H.ReadU16BE(in1 - 2) << (int)bitc1;
-                    // bits2 reads forward from in2
-                    bits2 |= (uint)H.ReadU16LE(in2) << (int)bitc2;
+                    cbits1 |= (ulong)H.ReadU16BE(in1 - 2) << cbitc1;
+                    cbits2 |= (ulong)(*(ushort*)in2) << cbitc2;
                 }
-                else if (in1 - in2 == 1)
+                else if (avail == 1)
                 {
-                    // Both streams access the same byte!
-                    bits1 |= (uint)in2[0] << (int)bitc1;
-                    bits2 |= (uint)in2[0] << (int)bitc2;
+                    ulong shared = in2[0];
+                    cbits1 |= shared << cbitc1;
+                    cbits2 |= shared << cbitc2;
                 }
 
                 // Decode from stream 1 (backward)
-                peek = bits1 & 2047;
-                ushort entry1 = table[peek];
-                cl = (uint)(entry1 & 0xFF);
-                sym = (uint)(entry1 >> 8);
+                uint entry1 = table[cbits1 & 2047];
+                cl = (int)(entry1 & 0xFF);
+                sym = entry1 >> 8;
 
-                if (bitc1 + (uint)Math.Min(in1 - in2, 2) * 8 < cl)
+                availBits = cbitc1 + (int)(avail < 2 ? avail : 2) * 8;
+                if (availBits < cl)
                 {
-                    H.LogOodle($"newlz_huff64: half={half} stream1 not enough bits: bitc1={bitc1} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream1 not enough bits: bitc1={cbitc1} available={availBits} cl={cl}");
                     return false;
                 }
 
-                bits1 >>= (int)cl;
-                bitc1 -= cl;
-                in1 -= (int)((7 - bitc1) >> 3);
-                bitc1 &= 7;
+                cbits1 >>= cl;
+                cbitc1 -= cl;
+                in1 -= (7 - cbitc1) >> 3;
+                cbitc1 &= 7;
                 *decodeptr++ = (byte)sym;
 
                 if (decodeptr >= decodeend) break;
 
                 // Decode from stream 2 (forward from middle)
-                peek = bits2 & 2047;
-                ushort entry2 = table[peek];
-                cl = (uint)(entry2 & 0xFF);
-                sym = (uint)(entry2 >> 8);
+                uint entry2 = table[cbits2 & 2047];
+                cl = (int)(entry2 & 0xFF);
+                sym = entry2 >> 8;
 
-                if (bitc2 + (uint)Math.Min(in1 - in2, 2) * 8 < cl)
+                if (cbitc2 + (int)(avail < 2 ? avail : 2) * 8 < cl)
                 {
-                    H.LogOodle($"newlz_huff64: half={half} stream2 not enough bits: bitc2={bitc2} available={(uint)Math.Min(in1 - in2, 2) * 8} cl={cl}");
+                    H.LogOodle($"newlz_huff64: half={half} stream2 not enough bits: bitc2={cbitc2} available={(int)(avail < 2 ? avail : 2) * 8} cl={cl}");
                     return false;
                 }
 
-                bits2 >>= (int)cl;
-                bitc2 -= cl;
-                in2 += (int)((7 - bitc2) >> 3);
-                bitc2 &= 7;
+                cbits2 >>= cl;
+                cbitc2 -= cl;
+                in2 += (7 - cbitc2) >> 3;
+                cbitc2 &= 7;
                 *decodeptr++ = (byte)sym;
 
                 // Corruption check
@@ -1156,9 +1279,9 @@ public static unsafe class OodleDecompressor
                 }
             }
 
-            s->bitp[0] = (ulong)in0; s->bits[0] = bits0; s->bitc[0] = bitc0;
-            s->bitp[1] = (ulong)in1; s->bits[1] = bits1; s->bitc[1] = bitc1;
-            s->bitp[2] = (ulong)in2; s->bits[2] = bits2; s->bitc[2] = bitc2;
+            s->bitp[0] = (ulong)in0; s->bits[0] = (uint)cbits0; s->bitc[0] = (uint)cbitc0;
+            s->bitp[1] = (ulong)in1; s->bits[1] = (uint)cbits1; s->bitc[1] = (uint)cbitc1;
+            s->bitp[2] = (ulong)in2; s->bits[2] = (uint)cbits2; s->bitc[2] = (uint)cbitc2;
             s->decodeptr[0] = (ulong)decodeptr;
 
             if (decodeptr != decodeend)
@@ -1741,44 +1864,46 @@ public static unsafe class OodleDecompressor
         }
         else
         {
-            if (from_end - from_ptr < 5) { H.LogOodle("newLZ_get_array_comp long: from_end - from_ptr < 5"); return -1; }
+            if (from_end - from_ptr < 5)
+            {
+                return -1;
+            }
 
             ulong h1 = *from_ptr++;
             uint h2 = H.ReadU32BE(from_ptr);
             from_ptr += 4;
             ulong headerVal = (h1 << 32) | h2;
 
-            H.LogOodle($"newLZ_get_array_comp long: h1={h1:X2} h2={h2:X8} headerVal={headerVal:X} headerVal>>36={headerVal >> 36} array_type={array_type}");
-
             if ((headerVal >> 36) != array_type)
             {
-                H.LogOodle($"newLZ_get_array_comp long: type mismatch {headerVal >> 36} != {array_type}");
                 return -1;
             }
 
             comp_len = (long)(headerVal & NEWLZ_ARRAY_SIZE_MASK);
             if (comp_len > (from_end - from_ptr))
             {
-                H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} > from_end-from_ptr={from_end - from_ptr}");
                 return -1;
             }
 
             to_len = (long)((headerVal >> NEWLZ_ARRAY_SIZE_BITS) & NEWLZ_ARRAY_SIZE_MASK);
             to_len++;
 
-            H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} to_len={to_len} to_len_max={to_len_max}");
-
             if (to_len > to_len_max)
             {
-                H.LogOodle($"newLZ_get_array_comp long: to_len={to_len} > to_len_max={to_len_max}");
                 return -1;
             }
-            if (comp_len >= to_len) { H.LogOodle($"newLZ_get_array_comp long: comp_len={comp_len} >= to_len={to_len}"); return -1; }
+            if (comp_len >= to_len)
+            {
+                return -1;
+            }
         }
 
         if (*ptr_to == scratch_ptr)
         {
-            if ((scratch_end - scratch_ptr) < to_len) { H.LogOodle($"newLZ_get_array_comp: scratch space too small"); return -1; }
+            if ((scratch_end - scratch_ptr) < to_len)
+            {
+                return -1;
+            }
             scratch_ptr += to_len;
         }
 
@@ -1786,37 +1911,19 @@ public static unsafe class OodleDecompressor
 
         if (array_type == NEWLZ_ARRAY_TYPE_SPLIT)
         {
-            H.LogOodle($"newLZ_get_array_comp: calling SPLIT, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} to_ptr={(long)*ptr_to:X}");
             comp_used = newLZ_get_array_split(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            H.LogOodle($"newLZ_get_array_comp: SPLIT returned comp_used={comp_used}");
-            if (to_len == 10498 && comp_used > 0)
-            {
-                byte* result = *ptr_to;
-                H.LogOodle($"SPLIT result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
-            }
         }
         else if (array_type == NEWLZ_ARRAY_TYPE_RLE)
         {
-            H.LogOodle($"newLZ_get_array_comp: calling RLE, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
             comp_used = newLZ_get_array_rle(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            H.LogOodle($"newLZ_get_array_comp: RLE returned comp_used={comp_used}");
         }
         else if (array_type == NEWLZ_ARRAY_TYPE_TANS)
         {
-            H.LogOodle($"newLZ_get_array_comp: calling TANS, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len}");
             comp_used = newlz_get_array_tans(from_ptr, comp_len, *ptr_to, to_len, scratch_ptr, scratch_end);
-            H.LogOodle($"newLZ_get_array_comp: TANS returned comp_used={comp_used}");
         }
         else
         {
-            H.LogOodle($"newLZ_get_array_comp: calling huff, from_ptr={((long)from_ptr):X} comp_len={comp_len} to_len={to_len} is_huff6={array_type == NEWLZ_ARRAY_TYPE_HUFF6} to_ptr={(long)*ptr_to:X}");
             comp_used = newlz_get_array_huff(from_ptr, comp_len, *ptr_to, to_len, array_type == NEWLZ_ARRAY_TYPE_HUFF6);
-            H.LogOodle($"newLZ_get_array_comp: huff returned comp_used={comp_used}");
-            if (to_len == 10498 && comp_used > 0)
-            {
-                byte* result = *ptr_to;
-                H.LogOodle($"HUFF result[385..395]={result[385]:X2} {result[386]:X2} {result[387]:X2} {result[388]:X2} {result[389]:X2} {result[390]:X2} {result[391]:X2} {result[392]:X2} {result[393]:X2} {result[394]:X2} {result[395]:X2}");
-            }
         }
 
         if (comp_len != comp_used) { H.LogOodle($"newLZ_get_array_comp: comp_len={comp_len} != comp_used={comp_used}"); return -1; }
@@ -2701,14 +2808,6 @@ public static unsafe class OodleDecompressor
                 return -1;
             }
 
-            // Log U32 excesses
-            {
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < decoded_count && i < 16; i++)
-                    sb.Append($"{excesses_u32_base[i]} ");
-                H.LogOodle($"  excesses_u32[0..{Math.Min((int)decoded_count, 16)-1}]: {sb}");
-            }
-
             // Merge
             byte* excesses_u8_ptr = excesses_u8;
             uint* excesses_ptr = excesses;
@@ -2779,12 +2878,6 @@ public static unsafe class OodleDecompressor
 
     private static long OodleLZ_Decompress(byte* compBuf, long compBufSize, byte* rawBuf, long rawLen)
     {
-        // Default values
-        OodleLZ_FuzzSafe fuzzSafe = OodleLZ_FuzzSafe.OodleLZ_FuzzSafe_Yes;
-        OodleLZ_CheckCRC checkCRC = OodleLZ_CheckCRC.OodleLZ_CheckCRC_No;
-        OodleLZ_Verbosity verbosity = OodleLZ_Verbosity.OodleLZ_Verbosity_None;
-        OodleLZ_Decode_ThreadPhase threadPhase = OodleLZ_Decode_ThreadPhase.OodleLZ_Decode_Unthreaded;
-
         if (rawLen <= 0) return 0;
 
         // OodleLZ_GetAllChunksCompressor logic (simplified)
@@ -2794,7 +2887,7 @@ public static unsafe class OodleDecompressor
         // Use thread-local scratch pool to avoid allocation overhead
         if (_scratchPool is null)
         {
-            _scratchPool = new byte[SCRATCH_POOL_SIZE];
+            _scratchPool = (byte*)NativeMemory.AlignedAlloc(SCRATCH_POOL_SIZE, (nuint)nint.Size);
         }
 
         // Decoder setup
@@ -2805,46 +2898,35 @@ public static unsafe class OodleDecompressor
         decoder.gotHeaderPos = -1; // Invalid initially
         decoder.callsWithoutProgress = 0;
         decoder.memorySize = SCRATCH_POOL_SIZE;
+        decoder.memory = _scratchPool;
 
-        fixed (byte* scratchPtr = _scratchPool)
+        long rawDecoded = 0;
+        long compUsed = 0;
+
+        while (rawDecoded < rawLen)
         {
-            decoder.memory = scratchPtr;
+            if (compUsed >= compBufSize) break;
 
-            long rawDecoded = 0;
-            long compUsed = 0;
+            bool result = OodleLZDecoder_DecodeSome(
+                ref decoder,
+                rawBuf,
+                rawDecoded,
+                rawLen, // decBufferSize
+                rawLen - rawDecoded, // decBufAvail
+                compBuf + compUsed,
+                compBufSize - compUsed,
+                out long decodedCount,
+                out long compConsumed
+            );
 
-            while (rawDecoded < rawLen)
-            {
-                if (compUsed >= compBufSize) break;
+            if (!result) break;
+            if (decodedCount == 0 && compConsumed == 0) break; // No progress
 
-                long decodedCount = 0;
-                long compConsumed = 0;
-
-                bool result = OodleLZDecoder_DecodeSome(
-                    ref decoder,
-                    rawBuf,
-                    rawDecoded,
-                    rawLen, // decBufferSize
-                    rawLen - rawDecoded, // decBufAvail
-                    compBuf + compUsed,
-                    compBufSize - compUsed,
-                    fuzzSafe,
-                    checkCRC,
-                    verbosity,
-                    threadPhase,
-                    out decodedCount,
-                    out compConsumed
-                );
-
-                if (!result) break;
-                if (decodedCount == 0 && compConsumed == 0) break; // No progress
-
-                rawDecoded += decodedCount;
-                compUsed += compConsumed;
-            }
-
-            return rawDecoded == rawLen ? rawDecoded : 0;
+            rawDecoded += decodedCount;
+            compUsed += compConsumed;
         }
+
+        return rawDecoded == rawLen ? rawDecoded : 0;
     }
 
     private static bool OodleLZDecoder_DecodeSome(
@@ -2855,10 +2937,6 @@ public static unsafe class OodleDecompressor
         long decBufAvail,
         byte* compBuf,
         long compBufAvail,
-        OodleLZ_FuzzSafe fuzzSafe,
-        OodleLZ_CheckCRC checkCRC,
-        OodleLZ_Verbosity verbose,
-        OodleLZ_Decode_ThreadPhase threadPhase,
         out long decodedCount,
         out long compBufUsed)
     {
@@ -3042,52 +3120,47 @@ public static unsafe class OodleDecompressor
     [StructLayout(LayoutKind.Sequential)]
     private struct newLZ_LOs
     {
-        public fixed int contents[8]; // 4 padding + 4 actual
+        public fixed int lasts[8]; // 4 padding + 4 actual values at indices 4-7
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Reset()
         {
-            contents[4] = NEWLZ_MIN_OFFSET;
-            contents[5] = NEWLZ_MIN_OFFSET;
-            contents[6] = NEWLZ_MIN_OFFSET;
+            lasts[4] = NEWLZ_MIN_OFFSET;
+            lasts[5] = NEWLZ_MIN_OFFSET;
+            lasts[6] = NEWLZ_MIN_OFFSET;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Reset_Neg()
         {
-            contents[4] = -NEWLZ_MIN_OFFSET;
-            contents[5] = -NEWLZ_MIN_OFFSET;
-            contents[6] = -NEWLZ_MIN_OFFSET;
+            lasts[4] = -NEWLZ_MIN_OFFSET;
+            lasts[5] = -NEWLZ_MIN_OFFSET;
+            lasts[6] = -NEWLZ_MIN_OFFSET;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int MTF4(int index)
         {
-            fixed (int* ptr = contents)
-            {
-                int* lasts = ptr + 4;
-                int top = lasts[index];
-                int m1 = lasts[index - 1];
-                int m2 = lasts[index - 2];
-                int m3 = lasts[index - 3];
-                lasts[index] = m1;
-                lasts[index - 1] = m2;
-                lasts[index - 2] = m3;
-                lasts[0] = top;
-                return top;
-            }
+            // Direct indexed access - JIT optimizes fixed arrays well
+            int top = lasts[4 + index];
+            // Unrolled shift - compiler can optimize based on index
+            if (index >= 3) lasts[7] = lasts[6];
+            if (index >= 2) lasts[6] = lasts[5];
+            if (index >= 1) lasts[5] = lasts[4];
+            lasts[4] = top;
+            return top;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Add(int offset)
         {
-            contents[7] = offset; // lasts[3] = offset
+            lasts[7] = offset;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int LastOffset()
         {
-            return contents[4]; // lasts[0]
+            return lasts[4];
         }
     }
 
@@ -3331,7 +3404,7 @@ public static unsafe class OodleDecompressor
             arrays.escape_offsets1 = (uint*)scratch_ptr;
             arrays.escape_offsets2 = arrays.escape_offsets1;
             scratch_ptr += 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT;
-            new Span<byte>(arrays.escape_offsets1, 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT).Clear();
+            Unsafe.InitBlockUnaligned((byte*)arrays.escape_offsets1, 0, (uint)(4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT));
         }
         else
         {
@@ -3358,12 +3431,12 @@ public static unsafe class OodleDecompressor
 
             arrays.escape_offsets1 = (uint*)scratch_ptr;
             scratch_ptr += 4 * off24_ptr_chunk_count1;
-            new Span<byte>(scratch_ptr, 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT).Clear();
+            Unsafe.InitBlockUnaligned(scratch_ptr, 0, (uint)(4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT));
             scratch_ptr += 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT;
 
             arrays.escape_offsets2 = (uint*)scratch_ptr;
             scratch_ptr += 4 * off24_ptr_chunk_count2;
-            new Span<byte>(scratch_ptr, 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT).Clear();
+            Unsafe.InitBlockUnaligned(scratch_ptr, 0, (uint)(4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT));
             scratch_ptr += 4 * NEWLZF_ESCAPE_OFFSET_PAD_ZERO_COUNT;
 
             int off24_data_len1 = newlzf_unpack_escape_offsets(comp_ptr, comp_end, arrays.escape_offsets1, off24_ptr_chunk_count1, chunk_pos);
@@ -3420,7 +3493,7 @@ public static unsafe class OodleDecompressor
         if (b > 251)
         {
             if (from + 2 > end) return 0;
-            int up = H.ReadU16LE(from);
+            int up = *(ushort*)from;
             from += 2;
             b += (up << 2);
         }
@@ -3481,115 +3554,129 @@ public static unsafe class OodleDecompressor
 
             byte* parse_chunk_end = chunk_ptr + chunk_len;
 
-            int packet_num = 0;
-            while (packets_ptr < packets_end)
+            // Split the main packet loop based on isSub to eliminate the branch in the hot path
+            if (isSub)
             {
-                int packet = *packets_ptr++;
-
-                if (packet >= 24)
+                // Hoist SWAR mask constant
+                const ulong mask = 0x7F7F7F7F7F7F7F7FUL;
+                
+                // Local copies of frequently accessed struct fields for better codegen
+                byte* literals_ptr_local = arrays.literals_ptr;
+                byte* off16_ptr_local = arrays.off16_ptr;
+                
+                while (packets_ptr < packets_end)
                 {
-                    // Simple packet
-                    int lrl = packet & 7;
-                    int ml = (packet >> 3) & 0xF;
-                    int offset_mask = (packet >> 7) - 1;
+                    uint packet = *packets_ptr++;
 
-                    int next_offset = -(int)H.ReadU16LE(arrays.off16_ptr);
-
-                    // Copy literals
-                    if (isSub)
+                    if (packet >= 128)
                     {
+                        // Repeat Match (Hot)
                         byte* match_base = to_ptr + neg_offset;
-                        // Unrolled SUB copy - lrl is 0-7
-                        switch (lrl)
-                        {
-                            case 7: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 6;
-                            case 6: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 5;
-                            case 5: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 4;
-                            case 4: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 3;
-                            case 3: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 2;
-                            case 2: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); match_base++; goto case 1;
-                            case 1: *to_ptr++ = (byte)(*arrays.literals_ptr++ + match_base[0]); break;
-                            case 0: break;
-                        }
+                        
+                        ulong lit8 = *(ulong*)literals_ptr_local;
+                        ulong match8 = *(ulong*)match_base;
+                        *(ulong*)to_ptr = ((lit8 & mask) + (match8 & mask)) ^ ((lit8 ^ match8) & ~mask);
+                        
+                        uint lrl = packet & 7;
+                        to_ptr += lrl;
+                        literals_ptr_local += lrl;
+                        
+                        uint ml = (packet >> 3) & 0xF;
+                        
+                        byte* match_ptr = to_ptr + neg_offset;
+                        if (match_ptr < window_base) return -1;
+                        *(ulong*)to_ptr = *(ulong*)match_ptr;
+                        *(ulong*)(to_ptr + 8) = *(ulong*)(match_ptr + 8);
+                        to_ptr += ml;
+                    }
+                    else if (packet >= 24)
+                    {
+                        // Normal Match (New Offset)
+                        byte* match_base = to_ptr + neg_offset;
+                        
+                        ulong lit8 = *(ulong*)literals_ptr_local;
+                        ulong match8 = *(ulong*)match_base;
+                        *(ulong*)to_ptr = ((lit8 & mask) + (match8 & mask)) ^ ((lit8 ^ match8) & ~mask);
+                        
+                        uint lrl = packet & 7;
+                        to_ptr += lrl;
+                        literals_ptr_local += lrl;
+
+                        int offset = *(ushort*)off16_ptr_local;
+                        neg_offset = -offset;
+                        off16_ptr_local += 2;
+                        
+                        uint ml = (packet >> 3) & 0xF;
+                        
+                        byte* match_ptr = to_ptr + neg_offset;
+                        if (match_ptr < window_base) return -1;
+                        *(ulong*)to_ptr = *(ulong*)match_ptr;
+                        *(ulong*)(to_ptr + 8) = *(ulong*)(match_ptr + 8);
+                        to_ptr += ml;
                     }
                     else
                     {
-                        // RAW mode - lrl is 0-7, use direct copy
-                        if (lrl >= 4)
+                        // Escape packet - SUB mode - sync locals back
+                        arrays.literals_ptr = literals_ptr_local;
+                        arrays.off16_ptr = off16_ptr_local;
+                        
+                        if (packet <= 2)
                         {
-                            *(uint*)to_ptr = *(uint*)arrays.literals_ptr;
-                            to_ptr += 4; arrays.literals_ptr += 4; lrl -= 4;
-                        }
-                        while (lrl-- > 0)
-                            *to_ptr++ = *arrays.literals_ptr++;
-                    }
-
-                    neg_offset ^= (next_offset ^ neg_offset) & offset_mask;
-                    if (offset_mask != 0) arrays.off16_ptr += 2;
-
-                    byte* match_ptr = to_ptr + neg_offset;
-                    if (match_ptr < window_base) return -1;
-
-                    // Copy match using 64-bit ops (16 bytes safe, ml <= 15)
-                    *(ulong*)to_ptr = *(ulong*)match_ptr;
-                    *(ulong*)(to_ptr + 8) = *(ulong*)(match_ptr + 8);
-                    to_ptr += ml;
-                }
-                else
-                {
-                    // Escape packet
-                    if (packet <= 2)
-                    {
-                        if (packet == 0) // Long LRL
-                        {
-                            int lrl = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
-                            lrl += NEWLZF_LRL_EXCESS;
-
-                            if (to_ptr + lrl > parse_chunk_end) return -1;
-
-                            if (isSub)
+                            if (packet == 0) // Long LRL
                             {
+                                int lrl = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                                lrl += NEWLZF_LRL_EXCESS;
+
+                                if (to_ptr + lrl > parse_chunk_end) return -1;
+
                                 H.CopySub_SIMD(to_ptr, arrays.literals_ptr, to_ptr + neg_offset, lrl);
                                 to_ptr += lrl;
                                 arrays.literals_ptr += lrl;
                             }
-                            else
+                            else if (packet == 1) // Long ML, OFF16
                             {
-                                H.CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
-                                to_ptr += lrl;
-                                arrays.literals_ptr += lrl;
+                                int excess_val = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                                int ml = NEWLZF_ML_EXCESS + excess_val;
+
+                                H.LogOodle($"  packet=1 Long ML OFF16: excess={excess_val} ml={ml}");
+
+                                int offset = H.ReadU16LE(arrays.off16_ptr);
+                                arrays.off16_ptr += 2;
+                                neg_offset = -offset;
+
+                                H.LogOodle($"  offset={offset} neg_offset={neg_offset}");
+
+                                byte* match_ptr = to_ptr + neg_offset;
+                                if (match_ptr < window_base) return -1;
+
+                                H.LogOodle($"  to_ptr-chunk={to_ptr - whole_chunk_ptr} match_ptr-window_base={match_ptr - window_base}");
+
+                                H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                                to_ptr += ml;
+                            }
+                            else // packet == 2, Long ML + New Offset
+                            {
+                                int ml = 21 + NEWLZF_OFF24_MML_DECODE + newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+
+                                if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
+                                int offset = (int)(*arrays.escape_offsets_ptr++);
+
+                                byte* match_ptr = chunk_ptr - offset;
+                                neg_offset = (int)(match_ptr - to_ptr);
+
+                                if (match_ptr < window_base) return -1;
+
+                                H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                                to_ptr += ml;
                             }
                         }
-                        else if (packet == 1) // Long ML, OFF16
+                        else // Short escape (packet 3-23)
                         {
-                            int excess_val = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
-                            int ml = NEWLZF_ML_EXCESS + excess_val;
-
-                            H.LogOodle($"  packet=1 Long ML OFF16: excess={excess_val} ml={ml}");
-
-                            // Read new 16-bit offset
-                            int offset = H.ReadU16LE(arrays.off16_ptr);
-                            arrays.off16_ptr += 2;
-                            neg_offset = -offset;
-
-                            H.LogOodle($"  offset={offset} neg_offset={neg_offset}");
-
-                            byte* match_ptr = to_ptr + neg_offset;
-                            if (match_ptr < window_base) return -1;
-
-                            H.LogOodle($"  to_ptr-chunk={to_ptr - whole_chunk_ptr} match_ptr-window_base={match_ptr - window_base}");
-
-                            H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
-                            to_ptr += ml;
-                        }
-                        else // packet == 2, Long ML + New Offset
-                        {
-                            int ml = 21 + NEWLZF_OFF24_MML_DECODE + newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                            int ml = (int)(packet - 3) + NEWLZF_OFF24_MML_DECODE;
 
                             if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
                             int offset = (int)(*arrays.escape_offsets_ptr++);
 
-                            // IMPORTANT: escape offsets are relative to chunk_ptr, not to_ptr!
                             byte* match_ptr = chunk_ptr - offset;
                             neg_offset = (int)(match_ptr - to_ptr);
 
@@ -3598,27 +3685,135 @@ public static unsafe class OodleDecompressor
                             H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
                             to_ptr += ml;
                         }
-                    }
-                    else // Short escape (packet 3-23)
-                    {
-                        int ml = packet - 3 + NEWLZF_OFF24_MML_DECODE;
-
-                        if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end)
-                            return -1;
-                        int offset = (int)(*arrays.escape_offsets_ptr++);
-
-                        // IMPORTANT: escape offsets are relative to chunk_ptr, not to_ptr!
-                        byte* match_ptr = chunk_ptr - offset;
-                        neg_offset = (int)(match_ptr - to_ptr);
-
-                        if (match_ptr < window_base)
-                            return -1;
-
-                        H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
-                        to_ptr += ml;
+                        
+                        // Reload locals after escape packet
+                        literals_ptr_local = arrays.literals_ptr;
+                        off16_ptr_local = arrays.off16_ptr;
                     }
                 }
-                packet_num++;
+                
+                // Sync locals back to struct
+                arrays.literals_ptr = literals_ptr_local;
+                arrays.off16_ptr = off16_ptr_local;
+            }
+            else
+            {
+                // RAW mode loop - no SUB operations
+                // Local copies for better codegen
+                byte* literals_ptr_local = arrays.literals_ptr;
+                byte* off16_ptr_local = arrays.off16_ptr;
+                
+                while (packets_ptr < packets_end)
+                {
+                    int packet = *packets_ptr++;
+
+                    if (packet >= 24)
+                    {
+                        // Simple packet - RAW mode
+                        int lrl = packet & 7;
+                        int ml = (packet >> 3) & 0xF;
+                        int offset_mask = (packet >> 7) - 1;
+
+                        int next_offset = -(int)*(ushort*)off16_ptr_local;
+
+                        // RAW mode - direct 64-bit copy
+                        *(ulong*)to_ptr = *(ulong*)literals_ptr_local;
+                        to_ptr += lrl;
+                        literals_ptr_local += lrl;
+
+                        // Branchless offset update and pointer advance
+                        neg_offset ^= (next_offset ^ neg_offset) & offset_mask;
+                        off16_ptr_local += (offset_mask & 2);
+
+                        byte* match_ptr = to_ptr + neg_offset;
+                        if (match_ptr < window_base) return -1;
+
+                        // Copy match using 64-bit ops (16 bytes safe, ml <= 15)
+                        *(ulong*)to_ptr = *(ulong*)match_ptr;
+                        *(ulong*)(to_ptr + 8) = *(ulong*)(match_ptr + 8);
+                        to_ptr += ml;
+                    }
+                    else
+                    {
+                        // Escape packet - RAW mode - sync locals back
+                        arrays.literals_ptr = literals_ptr_local;
+                        arrays.off16_ptr = off16_ptr_local;
+                        
+                        if (packet <= 2)
+                        {
+                            if (packet == 0) // Long LRL
+                            {
+                                int lrl = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                                lrl += NEWLZF_LRL_EXCESS;
+
+                                if (to_ptr + lrl > parse_chunk_end) return -1;
+
+                                H.CopyBytes_SIMD(to_ptr, arrays.literals_ptr, lrl);
+                                to_ptr += lrl;
+                                arrays.literals_ptr += lrl;
+                            }
+                            else if (packet == 1) // Long ML, OFF16
+                            {
+                                int excess_val = newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+                                int ml = NEWLZF_ML_EXCESS + excess_val;
+
+                                H.LogOodle($"  packet=1 Long ML OFF16: excess={excess_val} ml={ml}");
+
+                                int offset = H.ReadU16LE(arrays.off16_ptr);
+                                arrays.off16_ptr += 2;
+                                neg_offset = -offset;
+
+                                H.LogOodle($"  offset={offset} neg_offset={neg_offset}");
+
+                                byte* match_ptr = to_ptr + neg_offset;
+                                if (match_ptr < window_base) return -1;
+
+                                H.LogOodle($"  to_ptr-chunk={to_ptr - whole_chunk_ptr} match_ptr-window_base={match_ptr - window_base}");
+
+                                H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                                to_ptr += ml;
+                            }
+                            else // packet == 2, Long ML + New Offset
+                            {
+                                int ml = 21 + NEWLZF_OFF24_MML_DECODE + newlzf_getv(ref arrays.excesses_ptr, arrays.excesses_end);
+
+                                if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
+                                int offset = (int)(*arrays.escape_offsets_ptr++);
+
+                                byte* match_ptr = chunk_ptr - offset;
+                                neg_offset = (int)(match_ptr - to_ptr);
+
+                                if (match_ptr < window_base) return -1;
+
+                                H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                                to_ptr += ml;
+                            }
+                        }
+                        else // Short escape (packet 3-23)
+                        {
+                            int ml = packet - 3 + NEWLZF_OFF24_MML_DECODE;
+
+                            if (arrays.escape_offsets_ptr >= arrays.escape_offsets_end) return -1;
+                            int offset = (int)(*arrays.escape_offsets_ptr++);
+
+                            byte* match_ptr = chunk_ptr - offset;
+                            neg_offset = (int)(match_ptr - to_ptr);
+
+                            if (match_ptr < window_base) return -1;
+
+                            H.CopyMatch_SIMD(to_ptr, match_ptr, ml, -neg_offset);
+                            to_ptr += ml;
+                        }
+                        
+                        // Reload locals after escape packet
+                        literals_ptr_local = arrays.literals_ptr;
+                        off16_ptr_local = arrays.off16_ptr;
+                    }
+                }
+                
+                // Sync locals back to struct
+                arrays.literals_ptr = literals_ptr_local;
+                arrays.off16_ptr = off16_ptr_local;
             }
 
             // Final literals
@@ -4388,11 +4583,6 @@ public static unsafe class OodleDecompressor
         byte** literals_ptrs_o1 = stackalloc byte*[16];
         byte* next_literals_o1 = stackalloc byte[16];
 
-        long chunk_num = chunk_pos / 131072;
-
-        // Debug for LAMSUB chunk 35
-        bool debug_chunk35 = (chunk_num == 35 && chunk_type == 2);
-
         if (chunk_type == 3) // SUBAND3
         {
             for (int i = 0; i < 4; i++)
@@ -4407,14 +4597,6 @@ public static unsafe class OodleDecompressor
 
         if (chunk_type == 4)
         {
-            // Debug chunk 35
-            if (chunk_num == 35)
-            {
-                H.LogOodle($"phase2: chunk#{chunk_num} chunk_type=4 offsets_count={arrays.offsets_count} packets_count={arrays.packets_count} excesses_count={arrays.excesses_count}");
-                if (arrays.offsets_count > 0)
-                    H.LogOodle($"phase2: chunk#{chunk_num} offsets[0]={arrays.offsets[0]} [1]={arrays.offsets[1]} [2]={arrays.offsets[2]}");
-            }
-
             for(int i=0;i<16;i++)
             {
                 literals_ptrs_o1[i] = arrays.GetLiteralsPtr(i);
@@ -4433,22 +4615,6 @@ public static unsafe class OodleDecompressor
         byte* match_zone_end = chunk_end - NEWLZHC_CHUNK_NO_MATCH_ZONE;
         if (match_zone_end < chunk_ptr) match_zone_end = chunk_ptr;
 
-        // Debug: count packet_offset distribution
-        if (arrays.packets != null)
-        {
-            int* offset_counts = stackalloc int[8];
-            new Span<int>(offset_counts, 8).Clear();
-            byte* dbg_packets = arrays.packets;
-            byte* dbg_packets_end = dbg_packets + arrays.packets_count;
-            while (dbg_packets < dbg_packets_end)
-            {
-                uint dbg_packet = *dbg_packets++;
-                uint dbg_packet_offset = dbg_packet >> NEWLZHC_PACKET_OFFSET_SHIFT;
-                offset_counts[dbg_packet_offset]++;
-            }
-            H.LogOodle($"Chunk packet_offset distribution (chunk_pos={chunk_pos}): 0={offset_counts[0]} 1={offset_counts[1]} 2={offset_counts[2]} 3={offset_counts[3]} 4={offset_counts[4]} 5={offset_counts[5]} 6={offset_counts[6]} 7={offset_counts[7]}");
-        }
-
         if (arrays.packets != null)
         {
             // Single packet stream mode
@@ -4462,12 +4628,6 @@ public static unsafe class OodleDecompressor
                 lastoffsets[NEWLZHC_NUM_LAST_OFFSETS] = *offsets_ptr;
 
                 uint packet = *packets++;
-
-                long pnum = packets - arrays.packets - 1;
-                if (pnum >= 838 && pnum <= 842 && chunk_pos > 0)
-                {
-                    H.LogOodle($"phase2 (chunk1): raw_packet[{pnum}]=0x{packet:X2}");
-                }
 
                 // Leviathan packet: 3 bits offset | 2 bits lrl | 3 bits ml
                 uint lrl_part = (packet >> NEWLZHC_PACKET_ML_BITS) & NEWLZHC_PACKET_LRL_MAX;
@@ -4532,23 +4692,14 @@ public static unsafe class OodleDecompressor
                     {
                         byte sub = *literals_ptr_lam++;
                         byte predicted = to_ptr[neg_offset];
-                        byte output = (byte)(sub + predicted);
-                        if (debug_chunk35 && to_ptr - chunk_ptr < 10)
+                        *to_ptr++ = (byte)(sub + predicted);
+                        // Rest comes from main literals array like SUB - use SIMD for the rest
+                        long remaining = lrl - 1;
+                        if (remaining > 0)
                         {
-                            H.LogOodle($"LAMSUB first: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
-                        }
-                        *to_ptr++ = output;
-                        // Rest comes from main literals array like SUB
-                        for (long i = 1; i < lrl; i++)
-                        {
-                            sub = *literals_ptr++;
-                            predicted = to_ptr[neg_offset];
-                            output = (byte)(sub + predicted);
-                            if (debug_chunk35 && to_ptr - chunk_ptr < 10)
-                            {
-                                H.LogOodle($"LAMSUB rest: pos={to_ptr - chunk_ptr} sub={sub} predicted={predicted} output={output} neg_offset={neg_offset}");
-                            }
-                            *to_ptr++ = output;
+                            H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)remaining);
+                            to_ptr += remaining;
+                            literals_ptr += remaining;
                         }
                     }
                 }
@@ -4588,34 +4739,30 @@ public static unsafe class OodleDecompressor
                 int lo_index = (int)packet_offset;
                 neg_offset = lastoffsets[lo_index];
 
-                // Debug first few packets and any failures
-                long to_ptr_pos = to_ptr - chunk_ptr;
-                long packet_num = packets - arrays.packets - 1;
-                long offsets_consumed = offsets_ptr - arrays.offsets;
-                if (debug_chunk35 && packet_num < 3)
-                {
-                    H.LogOodle($"LAMSUB chunk35: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets[slot7]={lastoffsets[7]}");
-                    // Also show what offsets look like
-                    if (offsets_consumed < arrays.offsets_count)
-                        H.LogOodle($"LAMSUB chunk35: offsets_consumed={offsets_consumed} next_offsets={arrays.offsets[offsets_consumed]},{arrays.offsets[offsets_consumed+1]},{arrays.offsets[offsets_consumed+2]}");
-                }
                 if (to_ptr + neg_offset < window_base)
                 {
-                    // Also show the current preloaded offset at slot 7
-                    int next_offset = (offsets_ptr < arrays.offsets + arrays.offsets_count) ? *offsets_ptr : 0;
-                    H.LogOodle($"phase2: packet#{packet_num} pos={to_ptr_pos} lrl={lrl} ml={ml} packet_offset={packet_offset} neg_offset={neg_offset} offsets_consumed={offsets_consumed} next_offs={next_offset}");
+                    H.LogOodle($"phase2: window bounds check failed. to_ptr offset < window_base");
+                    return -1;
                 }
 
-                // MTF: shift values down and put selected value at front
-                for (int i = lo_index; i > 0; i--)
-                    lastoffsets[i] = lastoffsets[i - 1];
-                lastoffsets[0] = neg_offset;
-
-                // Advance offsets_ptr if we used the preloaded new offset (slot 7)
-                if (packet_offset == NEWLZHC_NUM_LAST_OFFSETS)
+                // MTF: unrolled shift - much faster than loop for 8 elements
+                // Select value at lo_index, shift [0..lo_index-1] right by 1, put selected at [0]
+                switch (lo_index)
                 {
-                    offsets_ptr++;
+                    case 0: break; // No shift needed
+                    case 1: lastoffsets[1] = lastoffsets[0]; break;
+                    case 2: lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 3: lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 4: lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 5: lastoffsets[5] = lastoffsets[4]; lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 6: lastoffsets[6] = lastoffsets[5]; lastoffsets[5] = lastoffsets[4]; lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    default: // case 7
+                        lastoffsets[7] = lastoffsets[6]; lastoffsets[6] = lastoffsets[5]; lastoffsets[5] = lastoffsets[4]; 
+                        lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0];
+                        offsets_ptr++; // Advance for new offset case
+                        break;
                 }
+                lastoffsets[0] = neg_offset;
 
                 // Get ML
                 if (ml == NEWLZHC_PACKET_ML_MAX + NEWLZHC_LOMML)
@@ -4640,35 +4787,19 @@ public static unsafe class OodleDecompressor
                 {
                     // Clamp to end of chunk
                     long remaining = chunk_end - to_ptr;
-                    if (debug_chunk35)
-                    {
-                        H.LogOodle($"LAMSUB clamping: to_ptr_pos={to_ptr - chunk_ptr} ml={ml} chunk_end_pos={chunk_end - chunk_ptr} remaining={remaining}");
-                    }
-                    if (remaining < 0) { H.LogOodle($"phase2: match bounds check failed (negative remaining). to_ptr={to_ptr - chunk_ptr} ml={ml} limit={chunk_end - chunk_ptr}"); return -1; }
+                    if (remaining < 0) { H.LogOodle($"phase2: match bounds check failed (negative remaining)"); return -1; }
                     ml = (uint)remaining;
                 }
                 if (to_ptr + neg_offset < window_base)
                 {
-                    H.LogOodle($"phase2: window bounds check failed. to_ptr={to_ptr - chunk_ptr} neg_offset={neg_offset} window_base={window_base - chunk_ptr}");
-                    H.LogOodle($"phase2: packet_offset={packet_offset} lastoffsets={lastoffsets[0]},{lastoffsets[1]},{lastoffsets[2]}...");
-                    H.LogOodle($"phase2: offsets consumed={(offsets_ptr - arrays.offsets)} packets processed={(packets - arrays.packets)}");
+                    H.LogOodle($"phase2: window bounds check failed");
                     return -1;
                 }
 
                 // Copy match using SIMD
                 byte* match_src = to_ptr + neg_offset;
-                byte* match_dst_start = to_ptr;
-                uint ml_orig = ml;
-                if (debug_chunk35 && to_ptr - chunk_ptr < 20)
-                {
-                    H.LogOodle($"LAMSUB match: pos={to_ptr - chunk_ptr} ml={ml} neg_offset={neg_offset} src[0..7]={match_src[0]:X2} {match_src[1]:X2} {match_src[2]:X2} {match_src[3]:X2} {match_src[4]:X2} {match_src[5]:X2} {match_src[6]:X2} {match_src[7]:X2}");
-                }
                 H.CopyMatch_SIMD(to_ptr, match_src, (int)ml, -neg_offset);
                 to_ptr += ml;
-                if (debug_chunk35 && match_dst_start - chunk_ptr < 20)
-                {
-                    H.LogOodle($"LAMSUB match: ml_orig={ml_orig} wrote bytes {match_dst_start[0]:X2} {match_dst_start[1]:X2} {match_dst_start[2]:X2} {match_dst_start[3]:X2} {match_dst_start[4]:X2} {match_dst_start[5]:X2}");
-                }
             }
         }
         else
@@ -4748,11 +4879,13 @@ public static unsafe class OodleDecompressor
                         byte sub = *literals_ptr_lam++;
                         *to_ptr = (byte)(sub + to_ptr[neg_offset]);
                         to_ptr++;
-                        // Rest comes from main literals array like SUB
-                        for (long i = 1; i < lrl; i++)
+                        // Rest comes from main literals array like SUB - use SIMD for the rest
+                        long remaining = lrl - 1;
+                        if (remaining > 0)
                         {
-                            *to_ptr = (byte)(*literals_ptr++ + to_ptr[neg_offset]);
-                            to_ptr++;
+                            H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, (int)remaining);
+                            to_ptr += remaining;
+                            literals_ptr += remaining;
                         }
                     }
                 }
@@ -4792,16 +4925,24 @@ public static unsafe class OodleDecompressor
                 int lo_index = (int)packet_offset;
                 neg_offset = lastoffsets[lo_index];
 
-                // MTF: shift values down and put selected value at front
-                for (int i = lo_index; i > 0; i--)
-                    lastoffsets[i] = lastoffsets[i - 1];
-                lastoffsets[0] = neg_offset;
-
-                // Advance offsets_ptr if we used the preloaded new offset (slot 7)
-                if (packet_offset == NEWLZHC_NUM_LAST_OFFSETS)
+                // MTF: unrolled shift - much faster than loop for 8 elements
+                // Select value at lo_index, shift [0..lo_index-1] right by 1, put selected at [0]
+                switch (lo_index)
                 {
-                    offsets_ptr++;
+                    case 0: break; // No shift needed
+                    case 1: lastoffsets[1] = lastoffsets[0]; break;
+                    case 2: lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 3: lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 4: lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 5: lastoffsets[5] = lastoffsets[4]; lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    case 6: lastoffsets[6] = lastoffsets[5]; lastoffsets[5] = lastoffsets[4]; lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0]; break;
+                    default: // case 7
+                        lastoffsets[7] = lastoffsets[6]; lastoffsets[6] = lastoffsets[5]; lastoffsets[5] = lastoffsets[4]; 
+                        lastoffsets[4] = lastoffsets[3]; lastoffsets[3] = lastoffsets[2]; lastoffsets[2] = lastoffsets[1]; lastoffsets[1] = lastoffsets[0];
+                        offsets_ptr++; // Advance for new offset case
+                        break;
                 }
+                lastoffsets[0] = neg_offset;
 
                 // Get ML
                 if (ml == NEWLZHC_PACKET_ML_MAX + NEWLZHC_LOMML)
@@ -5236,16 +5377,6 @@ public static unsafe class OodleDecompressor
             long literals_comp_len = newLZ_get_array(&literals, comp_ptr, chunk_comp_end, &literals_count, (long)(scratch_end - scratch_ptr), inplace_comp_raw_overlap, scratch_ptr, scratch_end);
             if (literals_comp_len < 0) return -1;
 
-            H.LogOodle($"newLZ_decode_chunk_phase1: literals_count={literals_count} literals_comp_len={literals_comp_len}");
-            if (literals_count > 0)
-            {
-                int show_start = (int)Math.Max(0, literals_count - 20);
-                var sb = new System.Text.StringBuilder();
-                for (int i = show_start; i < literals_count; i++)
-                    sb.Append($"{literals[i]:X2} ");
-                H.LogOodle($"newLZ_decode_chunk_phase1: literals[{show_start}..{literals_count-1}]: {sb}");
-            }
-
             comp_ptr += literals_comp_len;
             scratch_ptr += literals_count;
 
@@ -5259,14 +5390,6 @@ public static unsafe class OodleDecompressor
             long packets_count = 0;
             long packets_comp_len = newLZ_get_array(&packets, comp_ptr, chunk_comp_end, &packets_count, (long)(scratch_end - scratch_ptr), inplace_comp_raw_overlap, scratch_ptr, scratch_end);
             if (packets_comp_len < 0) return -1;
-
-            H.LogOodle($"newLZ_decode_chunk_phase1: packets_count={packets_count}");
-            if (packets_count <= 64)
-            {
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < packets_count; i++) sb.Append($"{packets[i]:X2} ");
-                H.LogOodle($"newLZ_decode_chunk_phase1: packets: {sb}");
-            }
 
             comp_ptr += packets_comp_len;
             scratch_ptr += packets_count;
@@ -5324,14 +5447,6 @@ public static unsafe class OodleDecompressor
             long excesses_u8_comp_len = newLZ_get_array(&excesses_u8, comp_ptr, chunk_comp_end, &excesses_count, (long)(scratch_end - scratch_ptr), false, scratch_ptr, scratch_end);
             if (excesses_u8_comp_len < 0) return -1;
 
-            H.LogOodle($"newLZ_decode_chunk_phase1: excesses_count={excesses_count} offsets_count={offsets_count}");
-            if (excesses_count <= 64)
-            {
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < excesses_count; i++) sb.Append($"{excesses_u8[i]:X2} ");
-                H.LogOodle($"newLZ_decode_chunk_phase1: excesses_u8: {sb}");
-            }
-
             comp_ptr += excesses_u8_comp_len;
             scratch_ptr += excesses_count;
         }
@@ -5354,7 +5469,7 @@ public static unsafe class OodleDecompressor
         if (scratch_used_ptr + 64 > scratch_end) return -1; // NEWLZ_EXTRA_SCRATCH_MEM_FOR_FUZZ = 64
 
         // Zero fuzz area
-        new Span<byte>(scratch_used_ptr, 64).Clear();
+        Unsafe.InitBlockUnaligned(scratch_used_ptr, 0, 64);
 
         if (newLZ_get_offsets_excesses(comp_ptr, chunk_comp_end, offsets_u8, offsets_u8_2, offsets_count, offset_alt_modulo, excesses_u8, excesses_count, offsets, excesses, chunk_pos + chunk_len, excess_hdr_byte, excess_stream_size) < 0)
         {
@@ -5407,83 +5522,95 @@ public static unsafe class OodleDecompressor
         byte* literals_start = literals_ptr;
         long literals_count = arrays.literals_count;
 
-        newLZ_LOs lastoffsets = new newLZ_LOs();
-        lastoffsets.Reset_Neg();
+        // Localized offsets history
+        int lo0 = -8, lo1 = -8, lo2 = -8; // -NEWLZ_MIN_OFFSET
         int neg_offset = -8; // -NEWLZ_MIN_OFFSET
 
         byte* packets_end = packets + packets_count;
-        byte* match_zone_end = chunk_end - 16; // NEWLZ_CHUNK_NO_MATCH_ZONE
-        byte* match_end = chunk_end - 8; // NEWLZ_MATCH_END_PAD (must be 8, not 5)
+        byte* match_end = chunk_end - 8; // NEWLZ_MATCH_END_PAD
 
         // Padding excesses
-        new Span<byte>(excesses + excesses_count, 16).Fill(3); // NEWLZ_PACKET_LRL_MAX
+        Unsafe.InitBlockUnaligned((byte*)(excesses + excesses_count), 3, 16); // NEWLZ_PACKET_LRL_MAX
 
-        int total_lrl = 0;
-        int total_ml = 0;
-        int packet_num = 0;
-        int excess_lrl_count = 0;
-        int excess_ml_count = 0;
         while (packets < packets_end)
         {
-            // In careful output mode, the check is done after computing lrl, not at loop start
-            // We use careful mode always (no sloppy optimized path)
-
-            long out_pos = to_ptr - chunk_base;
             byte packet = *packets++;
 
             int lrl = packet & 3;
             int packet_ml = (packet >> 2) & 0xF;
             int packet_offset = packet >> 6;
 
-            // Add next offset to LOs pending
-            lastoffsets.Add(*offsets_ptr);
+            int next_off = *offsets_ptr;
 
             // LRL
             if (lrl == 3)
             {
                 uint excess_val = *excesses_ptr++;
-                if (excess_lrl_count < 5 || packet_num >= packets_count - 3)
-                {
-                    H.LogOodle($"    Excess LRL at packet {packet_num}: raw=3 -> excess={excess_val}");
-                }
                 lrl = (int)excess_val;
-                excess_lrl_count++;
             }
 
-            total_lrl += lrl;
-
-            if (isSub)
+            if (lrl > 0)
             {
-                // Use SIMD SUB copy
-                H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
+                if (isSub)
+                {
+                    // Inline small SUB copy (common case)
+                    if (lrl <= 16)
+                    {
+                        byte* m = to_ptr + neg_offset;
+                        for (int i = 0; i < lrl; i++) to_ptr[i] = (byte)(literals_ptr[i] + m[i]);
+                    }
+                    else
+                    {
+                        H.CopySub_SIMD(to_ptr, literals_ptr, to_ptr + neg_offset, lrl);
+                    }
+                }
+                else
+                {
+                    // Inline small RAW copy
+                    if (lrl <= 16)
+                    {
+                         for (int i = 0; i < lrl; i++) to_ptr[i] = literals_ptr[i];
+                    }
+                    else
+                    {
+                        H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
+                    }
+                }
                 to_ptr += lrl;
                 literals_ptr += lrl;
             }
-            else
+
+            // Offset MTF logic scalarized
+            if (packet_offset == 0)
             {
-                // Use SIMD for RAW mode
-                H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
-                to_ptr += lrl;
-                literals_ptr += lrl;
+                neg_offset = lo0;
             }
-
-            // Offset
-            neg_offset = lastoffsets.MTF4(packet_offset);
-
-            if (packet_offset == 3)
+            else if (packet_offset == 1)
             {
+                neg_offset = lo1;
+                lo1 = lo0;
+                lo0 = neg_offset;
+            }
+            else if (packet_offset == 2)
+            {
+                neg_offset = lo2;
+                lo2 = lo1;
+                lo1 = lo0;
+                lo0 = neg_offset;
+            }
+            else // packet_offset == 3
+            {
+                neg_offset = next_off;
                 offsets_ptr++;
+                lo2 = lo1;
+                lo1 = lo0;
+                lo0 = neg_offset;
             }
 
-            if (-neg_offset < 8) 
+            if (-neg_offset < 8 || (ulong)neg_offset < (ulong)(window_base - to_ptr)) 
             {
-                H.LogOodle($"  FAIL: -neg_offset ({-neg_offset}) < 8 at packet {packet_num}");
-                return false;
-            }
-            if ((ulong)neg_offset < (ulong)(window_base - to_ptr)) 
-            {
-                H.LogOodle($"  FAIL: offset out of range at packet {packet_num}, neg_offset={neg_offset}, window_base-to_ptr={window_base - to_ptr}");
-                return false;
+                    H.LogOodle($"  FAIL: offset valid check failed, neg_offset={neg_offset}");
+                    return false;
             }
 
             // Match
@@ -5494,29 +5621,11 @@ public static unsafe class OodleDecompressor
                 // Excess ML
                 uint excess_val = *excesses_ptr++;
                 ml = 14 + (int)excess_val;
-                excess_ml_count++;
-
                 if (to_ptr + ml > match_end) return false;
-
-                byte* match_src = to_ptr + neg_offset;
-
-                // Use SIMD match copy
-                H.CopyMatch_SIMD(to_ptr, match_src, ml, -neg_offset);
-                to_ptr += ml;
-                total_ml += ml;
             }
-            else
-            {
-                // Short match (<= 16) - use two 64-bit copies
-                byte* match_src = to_ptr + neg_offset;
 
-                *(ulong*)to_ptr = *(ulong*)match_src;
-                *(ulong*)(to_ptr + 8) = *(ulong*)(match_src + 8);
-
-                to_ptr += ml;
-                total_ml += ml;
-            }
-            packet_num++;
+            H.CopyMatch_SIMD(to_ptr, to_ptr + neg_offset, ml, -neg_offset);
+            to_ptr += ml;
         }
 
         // Check whether we consumed all offsets and excesses
@@ -5534,20 +5643,6 @@ public static unsafe class OodleDecompressor
         if (to_ptr < chunk_end)
         {
             int lrl = (int)(chunk_end - to_ptr);
-            long lit_consumed = literals_ptr - literals_start;
-            long lit_remaining = arrays.literals_count - lit_consumed;
-            
-            H.LogOodle($"  Final literals: lrl={lrl} lit_consumed={lit_consumed} lit_remaining={lit_remaining}");
-            
-            // NOTE: The check (lit_remaining != lrl) is commented out because some streams
-            // may have extra literals that aren't consumed. The native Oodle DLL appears
-            // to be more lenient about this.
-            // if (lit_remaining != lrl)
-            // {
-            //     H.LogOodle($"  FAIL: final literals mismatch, lit_remaining={lit_remaining} lrl={lrl}");
-            //     return false;
-            // }
-            
             // Just copy what we need for the final LRL
             if (isSub)
             {
@@ -5562,13 +5657,6 @@ public static unsafe class OodleDecompressor
                 H.CopyBytes_SIMD(to_ptr, literals_ptr, lrl);
                 to_ptr += lrl;
                 literals_ptr += lrl;
-            }
-            // Log what we wrote
-            if (lrl > 0 && lrl <= 16)
-            {
-                var sb = new System.Text.StringBuilder();
-                for (int i = 0; i < lrl; i++) sb.Append($"{(to_ptr-lrl)[i]:X2} ");
-                H.LogOodle($"  Final dst[0..{lrl-1}]: {sb}");
             }
         }
 
@@ -5864,7 +5952,7 @@ public static unsafe class OodleDecompressor
     private static bool newlz_tans_UnPackCounts4(int L_bits, ref newlz_tans_UnpackedCounts counts, ref rrVarBits vbl)
     {
         byte* seen = stackalloc byte[256];
-        new Span<byte>(seen, 256).Clear();
+        Unsafe.InitBlockUnaligned(seen, 0, 256);
 
         uint L = 1u << L_bits;
 
@@ -6559,7 +6647,7 @@ public static unsafe class OodleDecompressor
         if (tans_compLen < 8)
         {
             if (tans_compLen <= 0) { H.LogOodle("newlz_get_array_tans: tans_compLen <= 0"); return -1; }
-            new Span<byte>(comp_scratch, 2 * 8 + 8).Clear();
+            Unsafe.InitBlockUnaligned(comp_scratch, 0, (uint)(2 * 8 + 8));
             Buffer.MemoryCopy(comp_ptr, comp_scratch + 8, tans_compLen, tans_compLen);
             comp_ptr = comp_scratch + 8;
             comp_end = comp_ptr + tans_compLen;
