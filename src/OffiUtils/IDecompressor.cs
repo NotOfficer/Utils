@@ -6,7 +6,6 @@ using System.Runtime.InteropServices;
 
 namespace OffiUtils;
 
-[Experimental(DiagnosticIds.ExperimentalIDecompressor)]
 public interface IDecompressor : IReadOnlyDictionary<CompressionAlgorithm, DecompressDelegate>
 {
     /// <summary>
@@ -40,7 +39,6 @@ public interface IDecompressor : IReadOnlyDictionary<CompressionAlgorithm, Decom
     );
 }
 
-[Experimental(DiagnosticIds.ExperimentalIDecompressor)]
 [SuppressMessage("ReSharper", "InconsistentNaming")]
 public enum CompressionAlgorithm
 {
@@ -69,7 +67,6 @@ public enum CompressionAlgorithm
 /// <summary>
 /// Represents a stateless decompression method.
 /// </summary>
-[Experimental(DiagnosticIds.ExperimentalIDecompressor)]
 public delegate bool DecompressDelegate(
     ReadOnlySpan<byte> source,
     Span<byte> destination,
@@ -79,7 +76,6 @@ public delegate bool DecompressDelegate(
 /// <summary>
 /// Represents a stateful decompression method (avoids closures).
 /// </summary>
-[Experimental(DiagnosticIds.ExperimentalIDecompressor)]
 public delegate bool DecompressDelegate<in TState>(
     TState state,
     ReadOnlySpan<byte> source,
@@ -87,7 +83,6 @@ public delegate bool DecompressDelegate<in TState>(
     out int bytesWritten
 );
 
-[Experimental(DiagnosticIds.ExperimentalIDecompressor)]
 public sealed class DecompressorBuilder
 {
     private readonly Dictionary<CompressionAlgorithm, DecompressDelegate> _handlers = new();
@@ -97,10 +92,6 @@ public sealed class DecompressorBuilder
         .Add(CompressionAlgorithm.Gzip, TryDecompressGzip)
         .Add(CompressionAlgorithm.Zlib, TryDecompressZlib)
         .Add(CompressionAlgorithm.Brotli, BrotliDecoder.TryDecompress);
-
-    [Experimental(DiagnosticIds.ExperimentalOodlePort)]
-    public static DecompressorBuilder DefaultWithOodlePort => Default
-        .Add(CompressionAlgorithm.Oodle, OodleDecompressor.TryDecompress);
 
     public DecompressorBuilder AddRange(IEnumerable<KeyValuePair<CompressionAlgorithm, DecompressDelegate>> values, bool replace = false)
     {

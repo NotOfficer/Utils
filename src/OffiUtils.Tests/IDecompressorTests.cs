@@ -4,8 +4,6 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
-#pragma warning disable DECOM001
-
 namespace OffiUtils.Tests;
 
 public class DecompressorTests
