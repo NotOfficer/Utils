@@ -4,21 +4,30 @@ namespace OffiUtils;
 
 public static class DateTimeUtils
 {
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static DateTime Trim(this DateTime date, long roundTicks)
+    extension(DateTime date)
     {
-        return new DateTime(date.Ticks - date.Ticks % roundTicks, date.Kind);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public DateTime Trim(long roundTicks)
+        {
+            return new DateTime(date.Ticks - date.Ticks % roundTicks, date.Kind);
+        }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static DateTimeOffset Trim(this DateTimeOffset date, long roundTicks)
+    extension(DateTimeOffset date)
     {
-        return new DateTimeOffset(date.Ticks - date.Ticks % roundTicks, date.Offset);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public DateTimeOffset Trim(long roundTicks)
+        {
+            return new DateTimeOffset(date.Ticks - date.Ticks % roundTicks, date.Offset);
+        }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static TimeOnly Trim(this TimeOnly time, long roundTicks)
+    extension(TimeOnly time)
     {
-        return new TimeOnly(time.Ticks - time.Ticks % roundTicks);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public TimeOnly Trim(long roundTicks)
+        {
+            return new TimeOnly(time.Ticks - time.Ticks % roundTicks);
+        }
     }
 }

@@ -1,5 +1,4 @@
 ﻿using BenchmarkDotNet.Attributes;
-using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
 
 using OffiUtils;
@@ -7,8 +6,6 @@ using OffiUtils;
 BenchmarkRunner.Run<Benchmarks>();
 
 [MemoryDiagnoser(false)]
-[SimpleJob(RuntimeMoniker.Net90, baseline: true)]
-[SimpleJob(RuntimeMoniker.Net80)]
 public class Benchmarks
 {
     private byte[] _bytes = null!;

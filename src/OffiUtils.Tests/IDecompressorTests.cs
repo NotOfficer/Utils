@@ -105,11 +105,7 @@ public class DecompressorTests
 
         IDecompressor decompressor = new DecompressorBuilder()
             .Add(CompressionAlgorithm.Brotli, new BrotliDecoder(),
-#if NET10_0_OR_GREATER
                 (decoder, src, dst, out bw)
-#else
-                (BrotliDecoder decoder, ReadOnlySpan<byte> src, Span<byte> dst, out int bw)
-#endif
                     => decoder.Decompress(src, dst, out _, out bw) == OperationStatus.Done)
             .Build();
 

@@ -2,60 +2,54 @@
 
 public static class CollectionUtils
 {
-    public static Dictionary<TKey, TValue> FilterBy<TKey, TValue>(
-        this IReadOnlyDictionary<TKey, TValue> source,
-        Predicate<KeyValuePair<TKey, TValue>> predicate,
-        IEqualityComparer<TKey>? comparer)
-        where TKey : notnull
+    extension<TKey, TValue>(IReadOnlyDictionary<TKey, TValue> source) where TKey : notnull
     {
-        var result = new Dictionary<TKey, TValue>(comparer);
-
-        foreach (KeyValuePair<TKey, TValue> item in source)
+        public Dictionary<TKey, TValue> FilterBy(Predicate<KeyValuePair<TKey, TValue>> predicate,
+            IEqualityComparer<TKey>? comparer)
         {
-            if (predicate(item))
+            var result = new Dictionary<TKey, TValue>(comparer);
+
+            foreach (KeyValuePair<TKey, TValue> item in source)
             {
-                result.Add(item.Key, item.Value);
+                if (predicate(item))
+                {
+                    result.Add(item.Key, item.Value);
+                }
             }
+
+            return result;
         }
 
-        return result;
-    }
-
-    public static Dictionary<TKey, TValue> FilterByKey<TKey, TValue>(
-        this IReadOnlyDictionary<TKey, TValue> source,
-        Predicate<TKey> predicate,
-        IEqualityComparer<TKey>? comparer)
-        where TKey : notnull
-    {
-        var result = new Dictionary<TKey, TValue>(comparer);
-
-        foreach (KeyValuePair<TKey, TValue> item in source)
+        public Dictionary<TKey, TValue> FilterByKey(Predicate<TKey> predicate,
+            IEqualityComparer<TKey>? comparer)
         {
-            if (predicate(item.Key))
+            var result = new Dictionary<TKey, TValue>(comparer);
+
+            foreach (KeyValuePair<TKey, TValue> item in source)
             {
-                result.Add(item.Key, item.Value);
+                if (predicate(item.Key))
+                {
+                    result.Add(item.Key, item.Value);
+                }
             }
+
+            return result;
         }
 
-        return result;
-    }
-
-    public static Dictionary<TKey, TValue> FilterByValue<TKey, TValue>(
-        this IReadOnlyDictionary<TKey, TValue> source,
-        Predicate<TValue> predicate,
-        IEqualityComparer<TKey>? comparer)
-        where TKey : notnull
-    {
-        var result = new Dictionary<TKey, TValue>(comparer);
-
-        foreach (KeyValuePair<TKey, TValue> item in source)
+        public Dictionary<TKey, TValue> FilterByValue(Predicate<TValue> predicate,
+            IEqualityComparer<TKey>? comparer)
         {
-            if (predicate(item.Value))
-            {
-                result.Add(item.Key, item.Value);
-            }
-        }
+            var result = new Dictionary<TKey, TValue>(comparer);
 
-        return result;
+            foreach (KeyValuePair<TKey, TValue> item in source)
+            {
+                if (predicate(item.Value))
+                {
+                    result.Add(item.Key, item.Value);
+                }
+            }
+
+            return result;
+        }
     }
 }

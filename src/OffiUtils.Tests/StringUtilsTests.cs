@@ -1,5 +1,7 @@
 namespace OffiUtils.Tests;
 
+#pragma warning disable CA1872
+
 public class StringUtilsTests
 {
     [Fact]

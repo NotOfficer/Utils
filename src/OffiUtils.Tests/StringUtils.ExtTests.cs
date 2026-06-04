@@ -1,5 +1,7 @@
 ﻿using CommunityToolkit.HighPerformance.Buffers;
 
+#pragma warning disable IDE0018
+
 namespace OffiUtils.Tests;
 
 public class StringUtilsExtTests
@@ -7,7 +9,7 @@ public class StringUtilsExtTests
     [Fact]
     public void GetRawData()
     {
-        string str = new string('1', 3);
+        string str = new('1', 3);
         ref char rawData = ref str.GetRawData();
         Assert.Equal('1', rawData);
         rawData = 'a';
@@ -17,7 +19,7 @@ public class StringUtilsExtTests
     [Fact]
     public void GetSpan()
     {
-        string str = new string('1', 3);
+        string str = new('1', 3);
         Span<char> span = str.GetSpan();
         Assert.Equal(str.AsSpan(), span);
         span.Fill('a');

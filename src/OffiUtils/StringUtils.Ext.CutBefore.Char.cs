@@ -6,55 +6,68 @@ namespace OffiUtils;
 
 public static partial class StringUtils
 {
-    public static string CutBefore(this string value, char needle, StringPool? pool = null)
-        => TryCutBefore(value.AsSpan(), needle, pool, out string? result) ? result : value;
-    public static string CutBefore(this ReadOnlySpan<char> value, char needle, StringPool? pool = null)
-        => TryCutBefore(value, needle, pool, out string? result) ? result : value.ToString();
-
-    public static bool TryCutBefore(this string value, char needle, [NotNullWhen(true)] out string? result)
-        => TryCutBefore(value.AsSpan(), needle, null, out result);
-    public static bool TryCutBefore(this ReadOnlySpan<char> value, char needle, [NotNullWhen(true)] out string? result)
-        => TryCutBefore(value, needle, null, out result);
-    public static bool TryCutBefore(this string value, char needle, StringPool? pool, [NotNullWhen(true)] out string? result)
-        => TryCutBefore(value.AsSpan(), needle, pool, out result);
-    public static bool TryCutBefore(this ReadOnlySpan<char> value, char needle, StringPool? pool, [NotNullWhen(true)] out string? result)
+    extension(string value)
     {
-        if (TryCutSpanBefore(value, needle, out ReadOnlySpan<char> cutValue))
-        {
-            result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
-            return true;
-        }
-        result = null;
-        return false;
+        public string CutBefore(char needle, StringPool? pool = null)
+            => value.AsSpan().TryCutBefore(needle, pool, out string? result) ? result : value;
+
+        public bool TryCutBefore(char needle, [NotNullWhen(true)] out string? result)
+            => value.AsSpan().TryCutBefore(needle, null, out result);
+
+        public bool TryCutBefore(char needle, StringPool? pool, [NotNullWhen(true)] out string? result)
+            => value.AsSpan().TryCutBefore(needle, pool, out result);
+
+        public bool TryCutBefore(char needle, Span<char> destination, out int charsWritten)
+            => value.AsSpan().TryCutBefore(needle, destination, out charsWritten);
+
+        public ReadOnlySpan<char> CutSpanBefore(char needle)
+            => value.AsSpan().TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue) ? cutValue : value;
+
+        public bool TryCutSpanBefore(char needle, out ReadOnlySpan<char> cutValue)
+            => value.AsSpan().TryCutSpanBefore(needle, out cutValue);
     }
 
-    public static bool TryCutBefore(this string value, char needle, Span<char> destination, out int charsWritten)
-        => TryCutBefore(value.AsSpan(), needle, destination, out charsWritten);
-    public static bool TryCutBefore(this ReadOnlySpan<char> value, char needle, Span<char> destination, out int charsWritten)
+    extension(ReadOnlySpan<char> value)
     {
-        if (TryCutSpanBefore(value, needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
+        public string CutBefore(char needle, StringPool? pool = null)
+            => value.TryCutBefore(needle, pool, out string? result) ? result : value.ToString();
+
+        public bool TryCutBefore(char needle, [NotNullWhen(true)] out string? result)
+            => value.TryCutBefore(needle, null, out result);
+
+        public bool TryCutBefore(char needle, StringPool? pool, [NotNullWhen(true)] out string? result)
         {
-            charsWritten = cutValue.Length;
+            if (value.TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue))
+            {
+                result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
+                return true;
+            }
+            result = null;
+            return false;
+        }
+
+        public bool TryCutBefore(char needle, Span<char> destination, out int charsWritten)
+        {
+            if (value.TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
+            {
+                charsWritten = cutValue.Length;
+                return true;
+            }
+            charsWritten = 0;
+            return false;
+        }
+
+        public ReadOnlySpan<char> CutSpanBefore(char needle)
+            => value.TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue) ? cutValue : value;
+
+        public bool TryCutSpanBefore(char needle, out ReadOnlySpan<char> cutValue)
+        {
+            cutValue = default;
+            if (value.IsEmpty) return false;
+            int index = value.IndexOf(needle);
+            if (index == -1) return false;
+            cutValue = value[..index];
             return true;
         }
-        charsWritten = 0;
-        return false;
-    }
-
-    public static ReadOnlySpan<char> CutSpanBefore(this string value, char needle)
-        => TryCutSpanBefore(value.AsSpan(), needle, out ReadOnlySpan<char> cutValue) ? cutValue : value;
-    public static ReadOnlySpan<char> CutSpanBefore(this ReadOnlySpan<char> value, char needle)
-        => TryCutSpanBefore(value, needle, out ReadOnlySpan<char> cutValue) ? cutValue : value;
-
-    public static bool TryCutSpanBefore(this string value, char needle, out ReadOnlySpan<char> cutValue)
-        => TryCutSpanBefore(value.AsSpan(), needle, out cutValue);
-    public static bool TryCutSpanBefore(this ReadOnlySpan<char> value, char needle, out ReadOnlySpan<char> cutValue)
-    {
-        cutValue = default;
-        if (value.IsEmpty) return false;
-        int index = value.IndexOf(needle);
-        if (index == -1) return false;
-        cutValue = value[..index];
-        return true;
     }
 }
