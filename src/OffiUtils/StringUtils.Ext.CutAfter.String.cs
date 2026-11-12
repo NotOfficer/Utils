@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 
 using CommunityToolkit.HighPerformance.Buffers;
 
@@ -74,7 +75,7 @@ public static partial class StringUtils
 
         public bool TryCutAfter(ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool, [NotNullWhen(true)] out string? result)
         {
-            if (value.TryCutSpanAfter(needle, out ReadOnlySpan<char> cutValue))
+            if (value.TryCutSpanAfter(needle, comparisonType, out ReadOnlySpan<char> cutValue))
             {
                 result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
                 return true;
@@ -88,7 +89,7 @@ public static partial class StringUtils
 
         public bool TryCutAfter(ReadOnlySpan<char> needle, StringComparison comparisonType, Span<char> destination, out int charsWritten)
         {
-            if (value.TryCutSpanAfter(needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
+            if (value.TryCutSpanAfter(needle, comparisonType, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
             {
                 charsWritten = cutValue.Length;
                 return true;
@@ -107,10 +108,45 @@ public static partial class StringUtils
         {
             cutValue = default;
             if (value.IsEmpty) return false;
-            int index = value.IndexOf(needle, comparisonType);
+            int index = IndexOf(value, needle, comparisonType, out int matchLength);
             if (index == -1) return false;
-            cutValue = value[(index + needle.Length)..];
+            cutValue = value[(index + matchLength)..];
             return true;
         }
     }
+
+    // culture-sensitive matches can be longer or shorter than the needle (ignorable characters like U+00AD,
+    // or "\u00C5" matching "A\u030A"), so cutting after a match needs the length of the matched text
+    private static int IndexOf(ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType, out int matchLength)
+    {
+        if (comparisonType is StringComparison.Ordinal or StringComparison.OrdinalIgnoreCase)
+        {
+            matchLength = needle.Length;
+            return value.IndexOf(needle, comparisonType);
+        }
+
+        (CompareInfo compareInfo, CompareOptions options) = GetCompareInfo(comparisonType);
+        return compareInfo.IndexOf(value, needle, options, out matchLength);
+    }
+
+    private static int LastIndexOf(ReadOnlySpan<char> value, ReadOnlySpan<char> needle, StringComparison comparisonType, out int matchLength)
+    {
+        if (comparisonType is StringComparison.Ordinal or StringComparison.OrdinalIgnoreCase)
+        {
+            matchLength = needle.Length;
+            return value.LastIndexOf(needle, comparisonType);
+        }
+
+        (CompareInfo compareInfo, CompareOptions options) = GetCompareInfo(comparisonType);
+        return compareInfo.LastIndexOf(value, needle, options, out matchLength);
+    }
+
+    private static (CompareInfo CompareInfo, CompareOptions Options) GetCompareInfo(StringComparison comparisonType) => comparisonType switch
+    {
+        StringComparison.CurrentCulture => (CultureInfo.CurrentCulture.CompareInfo, CompareOptions.None),
+        StringComparison.CurrentCultureIgnoreCase => (CultureInfo.CurrentCulture.CompareInfo, CompareOptions.IgnoreCase),
+        StringComparison.InvariantCulture => (CultureInfo.InvariantCulture.CompareInfo, CompareOptions.None),
+        StringComparison.InvariantCultureIgnoreCase => (CultureInfo.InvariantCulture.CompareInfo, CompareOptions.IgnoreCase),
+        _ => throw new ArgumentException("The string comparison type passed in is currently not supported.", nameof(comparisonType))
+    };
 }

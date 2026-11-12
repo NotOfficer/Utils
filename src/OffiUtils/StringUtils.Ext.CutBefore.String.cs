@@ -73,7 +73,7 @@ public static partial class StringUtils
 
         public bool TryCutBefore(ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool, [NotNullWhen(true)] out string? result)
         {
-            if (value.TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue))
+            if (value.TryCutSpanBefore(needle, comparisonType, out ReadOnlySpan<char> cutValue))
             {
                 result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
                 return true;
@@ -87,7 +87,7 @@ public static partial class StringUtils
 
         public bool TryCutBefore(ReadOnlySpan<char> needle, StringComparison comparisonType, Span<char> destination, out int charsWritten)
         {
-            if (value.TryCutSpanBefore(needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
+            if (value.TryCutSpanBefore(needle, comparisonType, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
             {
                 charsWritten = cutValue.Length;
                 return true;
