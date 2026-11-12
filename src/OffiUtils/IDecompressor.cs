@@ -1,4 +1,8 @@
-﻿using System.Collections;
+﻿#if NET11_0_OR_GREATER
+using System.Buffers;
+using System.Buffers.Binary;
+#endif
+using System.Collections;
 using System.Collections.Frozen;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.Compression;
@@ -14,7 +18,7 @@ public interface IDecompressor : IReadOnlyDictionary<CompressionAlgorithm, Decom
     /// <param name="algorithm">The algorithm to use.</param>
     /// <param name="source">The compressed data.</param>
     /// <param name="destination">The buffer to write decompressed data to.</param>
-    /// <param name="bytesWritten">The number of bytes successfully written to the destination.</param>
+    /// <param name="bytesWritten">The number of bytes successfully written to the destination, or 0 if decompression failed.</param>
     /// <returns>True if decompression succeeded; otherwise, false.</returns>
     bool TryDecompress(
         CompressionAlgorithm algorithm,
@@ -87,10 +91,19 @@ public sealed class DecompressorBuilder
 {
     private readonly Dictionary<CompressionAlgorithm, DecompressDelegate> _handlers = new();
 
+    /// <summary>
+    /// Creates a builder with the built-in algorithms registered. On every target framework, their decoders succeed
+    /// only if the compressed data is complete and its entire output fits into the destination.
+    /// Bytes after the end of the compressed data are ignored, except that further gzip members
+    /// and Zstandard frames are decompressed as well.
+    /// </summary>
     public static DecompressorBuilder Default => new DecompressorBuilder()
         .Add(CompressionAlgorithm.Deflate, TryDecompressDeflate)
         .Add(CompressionAlgorithm.Gzip, TryDecompressGzip)
         .Add(CompressionAlgorithm.Zlib, TryDecompressZlib)
+#if NET11_0_OR_GREATER
+        .Add(CompressionAlgorithm.Zstd, TryDecompressZstd)
+#endif
         .Add(CompressionAlgorithm.Brotli, BrotliDecoder.TryDecompress);
 
     public DecompressorBuilder AddRange(IEnumerable<KeyValuePair<CompressionAlgorithm, DecompressDelegate>> values, bool replace = false)
@@ -142,60 +155,164 @@ public sealed class DecompressorBuilder
         return new FastDecompressor(_handlers.ToFrozenDictionary());
     }
 
-    internal static bool TryDecompressDeflate(
+#if NET11_0_OR_GREATER
+
+    // The static TryDecompress methods of the span decoders also fail when bytes follow the compressed data.
+    // The instance API stops at the end of the data, so these use it to get the same results as the stream fallback.
+
+    private static bool TryDecompressDeflate(
         ReadOnlySpan<byte> source,
         Span<byte> destination,
         out int bytesWritten)
     {
-        return TryDecompressStream(source, destination, out bytesWritten,
+        using DeflateDecoder decoder = new();
+        return decoder.Decompress(source, destination, out _, out bytesWritten) == OperationStatus.Done;
+    }
+
+    private static bool TryDecompressGzip(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        out int bytesWritten)
+    {
+        using GZipDecoder decoder = new();
+        Span<byte> scratch = stackalloc byte[1];
+        bytesWritten = 0;
+
+        while (true)
+        {
+            // The decoders report DestinationTooSmall for an empty buffer even if nothing is left to write,
+            // so once the destination is full they get a one-byte buffer that has to stay empty.
+            bool full = bytesWritten == destination.Length;
+            Span<byte> output = full ? scratch : destination[bytesWritten..];
+            if (decoder.Decompress(source, output, out int bytesConsumed, out int written) != OperationStatus.Done || (full && written != 0))
+                return false;
+
+            bytesWritten += written;
+            source = source[bytesConsumed..];
+
+            // Like GZipStream, decompress the next member if the remaining input starts like one (RFC 1952, section 2.2).
+            if (source.IsEmpty || source[0] != 0x1F || (source.Length > 1 && source[1] != 0x8B))
+                return true;
+
+            decoder.Reset();
+        }
+    }
+
+    private static bool TryDecompressZlib(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        out int bytesWritten)
+    {
+        using ZLibDecoder decoder = new();
+        return decoder.Decompress(source, destination, out _, out bytesWritten) == OperationStatus.Done;
+    }
+
+    private static bool TryDecompressZstd(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        out int bytesWritten)
+    {
+        const uint FrameMagic = 0xFD2FB528;
+        const uint SkippableFrameMagic = 0x184D2A50; // the lowest 4 bits can have any value
+
+        using ZstandardDecoder decoder = new();
+        Span<byte> scratch = stackalloc byte[1];
+        bytesWritten = 0;
+
+        while (true)
+        {
+            // Like in TryDecompressGzip, a full destination gets a one-byte buffer that has to stay empty.
+            bool full = bytesWritten == destination.Length;
+            Span<byte> output = full ? scratch : destination[bytesWritten..];
+            if (decoder.Decompress(source, output, out int bytesConsumed, out int written) != OperationStatus.Done || (full && written != 0))
+                return false;
+
+            bytesWritten += written;
+            source = source[bytesConsumed..];
+
+            // Like ZstandardStream, decompress the next frame if the remaining input starts with a frame magic number
+            // (RFC 8878, sections 3.1.1 and 3.1.2).
+            if (source.Length < sizeof(uint))
+                return true;
+
+            uint magic = BinaryPrimitives.ReadUInt32LittleEndian(source);
+            if (magic != FrameMagic && (magic & ~0xFu) != SkippableFrameMagic)
+                return true;
+
+            decoder.Reset();
+        }
+    }
+
+#else
+
+    private static bool TryDecompressDeflate(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        out int bytesWritten)
+    {
+        return TryDecompressStream(source, destination, out bytesWritten, appendSentinel: false,
             static s => new DeflateStream(s, CompressionMode.Decompress, leaveOpen: true));
     }
 
-    internal static bool TryDecompressGzip(
+    private static bool TryDecompressGzip(
         ReadOnlySpan<byte> source,
         Span<byte> destination,
         out int bytesWritten)
     {
-        return TryDecompressStream(source, destination, out bytesWritten,
+        return TryDecompressStream(source, destination, out bytesWritten, appendSentinel: true,
             static s => new GZipStream(s, CompressionMode.Decompress, leaveOpen: true));
     }
 
-    internal static bool TryDecompressZlib(
+    private static bool TryDecompressZlib(
         ReadOnlySpan<byte> source,
         Span<byte> destination,
         out int bytesWritten)
     {
-        return TryDecompressStream(source, destination, out bytesWritten,
+        return TryDecompressStream(source, destination, out bytesWritten, appendSentinel: false,
             static s => new ZLibStream(s, CompressionMode.Decompress, leaveOpen: true));
     }
 
-    internal static unsafe bool TryDecompressStream(
+    private static unsafe bool TryDecompressStream(
         ReadOnlySpan<byte> source,
         Span<byte> destination,
         out int bytesWritten,
-        Func<UnmanagedMemoryStream, Stream> createDecompressionStream)
+        bool appendSentinel,
+        Func<Stream, Stream> createDecompressionStream)
     {
         bytesWritten = 0;
 
         if (source.IsEmpty)
-            return true;
+            return false;
 
         try
         {
             fixed (byte* sourcePtr = source)
             {
-                using UnmanagedMemoryStream sourceStream = new(sourcePtr, source.Length);
+                using SourceStream sourceStream = new(sourcePtr, source.Length, appendSentinel);
                 using Stream decompressionStream = createDecompressionStream(sourceStream);
 
-                bytesWritten = 0;
-                while (bytesWritten < destination.Length)
+                int written = 0;
+                while (written < destination.Length)
                 {
-                    int read = decompressionStream.Read(destination[bytesWritten..]);
+                    int read = decompressionStream.Read(destination[written..]);
                     if (read == 0)
                         break;
-                    bytesWritten += read;
+                    written += read;
                 }
 
+                // A full destination is only enough if no output is left.
+                // Reading into an empty buffer doesn't decompress anything, so this reads one byte.
+                if (written == destination.Length)
+                {
+                    Span<byte> probe = stackalloc byte[1];
+                    if (decompressionStream.Read(probe) != 0)
+                        return false;
+                }
+
+                if (sourceStream.ReadPastEnd)
+                    return false;
+
+                bytesWritten = written;
                 return true;
             }
         }
@@ -205,7 +322,50 @@ public sealed class DecompressorBuilder
         }
     }
 
-    internal sealed class DelegateStateWrapper<TState>
+    /// <summary>
+    /// The source as a stream that records whether the decompression stream wanted more input than the source holds.
+    /// </summary>
+    /// <remarks>
+    /// DeflateStream only reads while the inflater is unfinished and out of input (DeflateStream.ReadCore in .NET 10),
+    /// so with complete data it never reads past the end, and with incomplete data it always does.
+    /// GZipStream also reads once more after a member that ends exactly at the end of the source, to look for the next one.
+    /// The optional sentinel byte answers that read. 0xFF can't start a member, so GZipStream stops there.
+    /// If an incomplete member uses up the sentinel as data instead, GZipStream reads again after it,
+    /// which counts as a read past the end like any other.
+    /// </remarks>
+    private sealed unsafe class SourceStream : UnmanagedMemoryStream
+    {
+        private bool _sentinelPending;
+
+        public SourceStream(byte* source, int length, bool appendSentinel) : base(source, length)
+        {
+            _sentinelPending = appendSentinel;
+        }
+
+        public bool ReadPastEnd { get; private set; }
+
+        // DeflateStream reads through this overload, and UnmanagedMemoryStream.Read(Span<byte>) forwards to it in derived types.
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int read = base.Read(buffer, offset, count);
+            if (read != 0 || count == 0)
+                return read;
+
+            if (_sentinelPending)
+            {
+                _sentinelPending = false;
+                buffer[offset] = 0xFF;
+                return 1;
+            }
+
+            ReadPastEnd = true;
+            return 0;
+        }
+    }
+
+#endif
+
+    private sealed class DelegateStateWrapper<TState>
     {
         private readonly TState _state;
         private readonly DecompressDelegate<TState> _method;
@@ -222,7 +382,7 @@ public sealed class DecompressorBuilder
         }
     }
 
-    internal sealed class FastDecompressor : IDecompressor
+    private sealed class FastDecompressor : IDecompressor
     {
         private readonly FrozenDictionary<CompressionAlgorithm, DecompressDelegate> _decompressors;
 
@@ -237,9 +397,15 @@ public sealed class DecompressorBuilder
             Span<byte> destination,
             out int bytesWritten)
         {
+            if (_decompressors.TryGetValue(algorithm, out DecompressDelegate? handler) &&
+                handler(source, destination, out bytesWritten) && bytesWritten != 0)
+            {
+                return true;
+            }
+
+            // A handler may report partial output when it fails.
             bytesWritten = 0;
-            return _decompressors.TryGetValue(algorithm, out DecompressDelegate? handler) &&
-                   handler(source, destination, out bytesWritten) && bytesWritten != 0;
+            return false;
         }
 
         public int Decompress(
