@@ -73,7 +73,7 @@ public static partial class StringUtils
 
         public bool TryCutAfterLast(ReadOnlySpan<char> needle, StringComparison comparisonType, StringPool? pool, [NotNullWhen(true)] out string? result)
         {
-            if (value.TryCutSpanAfterLast(needle, out ReadOnlySpan<char> cutValue))
+            if (value.TryCutSpanAfterLast(needle, comparisonType, out ReadOnlySpan<char> cutValue))
             {
                 result = pool is null ? cutValue.ToString() : pool.GetOrAdd(cutValue);
                 return true;
@@ -87,7 +87,7 @@ public static partial class StringUtils
 
         public bool TryCutAfterLast(ReadOnlySpan<char> needle, StringComparison comparisonType, Span<char> destination, out int charsWritten)
         {
-            if (value.TryCutSpanAfterLast(needle, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
+            if (value.TryCutSpanAfterLast(needle, comparisonType, out ReadOnlySpan<char> cutValue) && cutValue.TryCopyTo(destination))
             {
                 charsWritten = cutValue.Length;
                 return true;
@@ -106,9 +106,9 @@ public static partial class StringUtils
         {
             cutValue = default;
             if (value.IsEmpty) return false;
-            int index = value.LastIndexOf(needle, comparisonType);
+            int index = LastIndexOf(value, needle, comparisonType, out int matchLength);
             if (index == -1) return false;
-            cutValue = value[(index + needle.Length)..];
+            cutValue = value[(index + matchLength)..];
             return true;
         }
     }
