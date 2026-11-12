@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace OffiUtils;
 
-public static unsafe class JsonUtils
+public static class JsonUtils
 {
     public const int StackallocByteThreshold = 256;
     public static readonly UTF8Encoding Encoding = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
